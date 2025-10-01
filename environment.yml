@@ -1,0 +1,14 @@
+name: PySPIDER
+dependencies:
+    - python
+    - findiff
+    - pip
+    - ffmpeg
+    - h5py
+    - scipy
+    - notebook
+    - numpy
+    - matplotlib
+    - pip:
+        - numba-kdtree
+        - z3-solver
