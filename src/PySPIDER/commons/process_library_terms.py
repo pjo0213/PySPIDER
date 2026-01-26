@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace, field
 from collections import defaultdict
 
 import concurrent.futures
+from itertools import product
 
 from .z3base import (
     highest_index, Irrep, FullRank, SymmetricTraceFree, Antisymmetric, LiteralIndex
@@ -423,20 +424,42 @@ class AbstractDataset(object): # template for structure of all data associated w
     def make_domains(self, ndomains, domain_size, pad=0): # set domain_size/populate domains
         pass
 
-    def make_weights(self, m, qmax, symmetry=None): # populate weights/set weight_dxs
-        # symmetry: {None, "even", "odd"}
+    def make_weights(self, m: int, q_lists: list[list[int]] | None = None, qmax_list: list[int] | None = None,qmax: int | None = None, symmetry: str | None = None) -> None: # populate weights/set weight_dxs
+        # symmetry applies only when using qmax (legacy behavior). symmetry: {None, "even", "odd"}
         self.weights = []
         self.weight_dxs = [(width - 1) / 2 * dx for width, dx in zip(self.domain_size, self.dxs)]
-        for q in lists_for_N(self.n_dimensions, qmax):
-            if symmetry == "even" and any(q_i % 2 == 1 for q_i in q):
-                continue
-            elif symmetry == "odd" and any(q_i % 2 == 0 for q_i in q):
-                continue
-            weight = Weight([m] * self.n_dimensions, q, [0] * self.n_dimensions, dxs=self.weight_dxs)
+        n_dims = self.n_dimensions
+
+        if q_lists is not None:
+            if len(q_lists) != n_dims:
+                raise ValueError(f"q_lists must have length equal to number of space+time dimensions {n_dims}, got {len(q_lists)}")
+            q_iterator = product(*q_lists)
+            apply_symmetry = False
+        elif qmax_list is not None:
+            if len(qmax_list) != n_dims:
+                raise ValueError(f"qmax_list must have length equal to number of space+time dimensions {n_dims}, got {len(qmax_list)}")
+            q_iterator = product(*(range(qm + 1) for qm in qmax_list))
+            apply_symmetry = False
+        else:
+            if qmax is None:
+                raise ValueError("One of q_lists, qmax_list, or qmax must be provided.")
+            q_iterator = lists_for_N(n_dims, qmax)
+            apply_symmetry = True
+
+        for q in q_iterator:
+            q_list = list(q)
+            if len(q_list) != n_dims:
+                raise ValueError(f"Each q must have length {n_dims}, got {len(q_list)}")
+            if apply_symmetry:
+                if symmetry == "even" and any(q_i % 2 == 1 for q_i in q_list):
+                    continue
+                elif symmetry == "odd" and any(q_i % 2 == 0 for q_i in q_list):
+                    continue
+            weight = Weight([m] * n_dims, q_list, [0] * n_dims, dxs=self.weight_dxs)
             self.weights.append(weight)
             for irrep in self.irreps:
                 # note that we need to count spatial dimensions for this
-                self.tensor_weight_basis[irrep, weight] = TensorWeightBasis.make_basis(weight, self.n_dimensions-1, irrep)
+                self.tensor_weight_basis[irrep, weight] = TensorWeightBasis.make_basis(weight, n_dims-1, irrep)
 
     def get_index_assignments(self, term, tensor_weight, debug=False): # ONLY IMPLEMENTING FOR SIMPLER IDENTITY METRIC CASE
         n_spatial_dims = self.n_dimensions-1

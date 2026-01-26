@@ -80,6 +80,8 @@ class SRDataset(AbstractDataset):
                     np.linalg.norm(self.data_dict[name]) / 
                     np.sqrt(self.data_dict[name].size)
                 )
+                if np.isnan(self.scale_dict[name]['mean']):
+                    raise ValueError(f'NaNs present in field {name} - please replace with numeric data and try again')
                 self.scale_dict[name]['std'] = np.std(self.data_dict[name])
 
     def get_char_size(self, term):
