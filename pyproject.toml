@@ -33,3 +33,7 @@ where = ["src"]
 
 [tool.setuptools]
 license-files = []
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["src"]

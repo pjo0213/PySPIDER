@@ -169,7 +169,7 @@ class TensorWeight: # tensor-valued weight function
 
     def __hash__(self):
         return hash(repr(self))
-    
+
     def __eq__(self, other):
         if not isinstance(other, TensorWeight):
             return NotImplemented
@@ -365,6 +365,7 @@ def parallel_domain_task(domain):
 
 @dataclass(kw_only=True)
 class AbstractDataset(object): # template for structure of all data associated with a given sparse regression dataset
+    #enumerated struct
     world_size: list[float] # linear dimensions of dataset in physical units (spatial + time)
     data_dict: dict[Observable, np.ndarray[float]] # observable -> array of values (e.g. discrete - particle, spatial index, time)
     observables: list[Observable]  # list of observables
@@ -392,6 +393,8 @@ class AbstractDataset(object): # template for structure of all data associated w
     metric_is_identity: bool = True
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
+    integration_scheme: str = "trapz"
+    integration_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         self.n_dimensions = len(self.world_size) # number of dimensions (spatial + temporal)
@@ -487,7 +490,12 @@ class AbstractDataset(object): # template for structure of all data associated w
                 print("ARRAY IS 0")
             #else:
             #    print("MIDDLE NZ VALUE OF ARRAY:", '{:.2E}'.format(filtered_flat[lenf//2])) # middle of the array
-        result = int_arr(term_weight_product, dxs=self.dxs)
+        result = int_arr(
+            term_weight_product,
+            dxs=self.dxs,
+            scheme=self.integration_scheme,
+            scheme_options=self.integration_options,
+        )
         #if debug:
         #    print('Integrated result', result)
         return result
@@ -683,15 +691,116 @@ def get_slice(arr, domain):
         arr_slice = arr_slice[tuple(idx)]
     return arr_slice
 
-def int_arr(arr, dxs=None):  # integrate an array of values on an integration domain
+def _integration_scheme_name(scheme):
+    normalized = "trapz" if scheme is None else str(scheme).strip().lower().replace("_", "-")
+    aliases = {
+        "trapz": "trapz",
+        "trapezoid": "trapz",
+        "trapezoidal": "trapz",
+        "truncated-grid": "truncated-grid",
+        "truncated": "truncated-grid",
+        "truncated-chebyshev": "truncated-grid",
+        "chebyshev-truncated": "truncated-grid",
+    }
+    if normalized not in aliases:
+        supported = ", ".join(sorted(set(aliases.values())))
+        raise ValueError(f"Unsupported integration scheme '{scheme}'. Supported schemes: {supported}.")
+    return aliases[normalized]
+
+
+def _get_axis_option(value, axis, ndim):
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) == ndim:
+            return value[axis]
+    return value
+
+
+def _get_interval(interval_spec, axis, ndim):
+    if interval_spec is None:
+        return -1.0, 1.0
+    if isinstance(interval_spec, (list, tuple)):
+        if len(interval_spec) == 2 and all(np.isscalar(x) for x in interval_spec):
+            return float(interval_spec[0]), float(interval_spec[1])
+        if len(interval_spec) == ndim:
+            axis_interval = interval_spec[axis]
+            if not (isinstance(axis_interval, (list, tuple)) and len(axis_interval) == 2):
+                raise ValueError("Each axis interval must be a 2-tuple/list (a, b).")
+            return float(axis_interval[0]), float(axis_interval[1])
+    raise ValueError("intervals must be either (a, b) or a list of per-axis (a, b) pairs.")
+
+
+def _integrate_axis_truncated(arr, axis, ndim, scheme_options):
+    try:
+        from .truncated_quadrature import (
+            integrate as truncated_integrate,
+            truncated_chebyshev_nodes,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "The 'truncated-grid' integration scheme requires "
+            "'PySPIDER.commons.truncated_quadrature'."
+        ) from exc
+
+    interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
+    a, b = _get_interval(interval_spec, axis, ndim)
+    nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
+    if nodes_spec is None:
+        n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
+        n_intervals = arr.shape[0] - 1 if n_intervals_spec is None else int(n_intervals_spec)
+        nodes = truncated_chebyshev_nodes(n_intervals, a, b)
+    else:
+        nodes = np.asarray(nodes_spec, dtype=float)
+    if nodes.shape[0] != arr.shape[0]:
+        raise ValueError(
+            f"Expected {arr.shape[0]} quadrature nodes along axis {axis}, got {nodes.shape[0]}."
+        )
+
+    weight_func = _get_axis_option(scheme_options.get("weight_func"), axis, ndim)
+    m = _get_axis_option(scheme_options.get("m"), axis, ndim)
+    envelope_m = _get_axis_option(scheme_options.get("envelope_m"), axis, ndim)
+    degree = _get_axis_option(scheme_options.get("degree"), axis, ndim)
+
+    return np.apply_along_axis(
+        lambda values: truncated_integrate(
+            nodes,
+            values,
+            a,
+            b,
+            weight_func=weight_func,
+            m=m,
+            envelope_m=envelope_m,
+            degree=degree,
+        ),
+        axis=0,
+        arr=arr,
+    )
+
+
+def int_arr(arr, dxs=None, scheme="trapz", scheme_options=None):  # integrate an array of values on an integration domain
+    arr = np.asarray(arr, dtype=float)
     if dxs is None:
         dxs = [1] * len(arr.shape)
-    dx = dxs[0]
-    integral = np.trapz(arr, axis=0)
-    if len(dxs) == 1:
-        return integral
-    else:
-        return int_arr(integral, dxs[1:])
+    if len(dxs) != arr.ndim:
+        raise ValueError(f"dxs length ({len(dxs)}) must match array ndim ({arr.ndim}).")
+
+    scheme_name = _integration_scheme_name(scheme)
+    options = {} if scheme_options is None else dict(scheme_options)
+    ndim = arr.ndim
+    current = arr
+
+    for axis in range(ndim):
+        if scheme_name == "trapz":
+            current = np.trapezoid(current, axis=0)
+        elif scheme_name == "truncated-grid":
+            current = _integrate_axis_truncated(current, axis=axis, ndim=ndim, scheme_options=options)
+        else:
+            raise ValueError(f"Unsupported integration scheme '{scheme_name}'.")
+
+    return current
 
 def int_by_parts(term, weight, by_parts=True, dim=0):
     if weight.scale == 0 or not by_parts: # no point - the weight is zero anyway or we were asked not to
