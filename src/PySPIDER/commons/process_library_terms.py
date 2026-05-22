@@ -169,7 +169,7 @@ class TensorWeight: # tensor-valued weight function
 
     def __hash__(self):
         return hash(repr(self))
-
+    
     def __eq__(self, other):
         if not isinstance(other, TensorWeight):
             return NotImplemented
@@ -365,7 +365,6 @@ def parallel_domain_task(domain):
 
 @dataclass(kw_only=True)
 class AbstractDataset(object): # template for structure of all data associated with a given sparse regression dataset
-    #enumerated struct
     world_size: list[float] # linear dimensions of dataset in physical units (spatial + time)
     data_dict: dict[Observable, np.ndarray[float]] # observable -> array of values (e.g. discrete - particle, spatial index, time)
     observables: list[Observable]  # list of observables
