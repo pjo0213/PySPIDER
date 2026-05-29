@@ -700,6 +700,10 @@ def _integration_scheme_name(scheme):
         "truncated": "truncated-grid",
         "truncated-chebyshev": "truncated-grid",
         "chebyshev-truncated": "truncated-grid",
+        "clenshaw-curtis": "clenshaw-curtis",
+        "clenshaw": "clenshaw-curtis",
+        "lobatto": "clenshaw-curtis",
+        "lobatto-cc": "clenshaw-curtis",
     }
     if normalized not in aliases:
         supported = ", ".join(sorted(set(aliases.values())))
@@ -732,30 +736,44 @@ def _get_interval(interval_spec, axis, ndim):
     raise ValueError("intervals must be either (a, b) or a list of per-axis (a, b) pairs.")
 
 
-def _integrate_axis_truncated(arr, axis, ndim, scheme_options):
-    try:
-        from .truncated_quadrature import (
-            integrate as truncated_integrate,
-            truncated_chebyshev_nodes,
-        )
-    except ImportError as exc:
-        raise ImportError(
-            "The 'truncated-grid' integration scheme requires "
-            "'PySPIDER.commons.truncated_quadrature'."
-        ) from exc
-
+def _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options):
+    """Nodes for Chebyshev quadrature along one logical axis."""
     interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
     a, b = _get_interval(interval_spec, axis, ndim)
     nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
-    if nodes_spec is None:
-        n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
-        n_intervals = arr.shape[0] - 1 if n_intervals_spec is None else int(n_intervals_spec)
-        nodes = truncated_chebyshev_nodes(n_intervals, a, b)
+    if nodes_spec is not None:
+        return np.asarray(nodes_spec, dtype=float), a, b
+
+    from .chebyshev_integration import truncated_chebyshev_nodes
+
+    n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
+    if n_intervals_spec is None:
+        n_intervals = axis_size - 1
     else:
-        nodes = np.asarray(nodes_spec, dtype=float)
+        n_intervals = int(n_intervals_spec)
+    return truncated_chebyshev_nodes(n_intervals, a, b), a, b
+
+
+def _integrate_axis_truncated(arr, axis, ndim, scheme_options, original_shape):
+    try:
+        from .chebyshev_integration import integrate as truncated_integrate
+    except ImportError as exc:
+        raise ImportError(
+            "The 'truncated-grid' integration scheme requires "
+            "'PySPIDER.commons.chebyshev_integration'."
+        ) from exc
+
+    truncated_axes = scheme_options.get("truncated_axes", [0])
+    if axis not in truncated_axes:
+        return np.trapezoid(arr, axis=0)
+
+    axis_size = original_shape[axis]
+    nodes, a, b = _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options)
     if nodes.shape[0] != arr.shape[0]:
         raise ValueError(
-            f"Expected {arr.shape[0]} quadrature nodes along axis {axis}, got {nodes.shape[0]}."
+            f"Along axis {axis}, array length {arr.shape[0]} does not match "
+            f"{nodes.shape[0]} Chebyshev nodes. Pass explicit 'nodes' in "
+            "integration_options or slice data to the truncated node set."
         )
 
     weight_func = _get_axis_option(scheme_options.get("weight_func"), axis, ndim)
@@ -779,6 +797,62 @@ def _integrate_axis_truncated(arr, axis, ndim, scheme_options):
     )
 
 
+def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_shape):
+    """Integrate along one axis with DCT Clenshaw-Curtis on a full Lobatto grid."""
+    try:
+        from .chebyshev_integration import (
+            chebyshev_lobatto_nodes,
+            integrate_weighted_clenshaw_curtis_from_values,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "The 'clenshaw-curtis' integration scheme requires "
+            "'PySPIDER.commons.chebyshev_integration'."
+        ) from exc
+
+    lobatto_axes = scheme_options.get("lobatto_axes", [0])
+    if axis not in lobatto_axes:
+        return np.trapezoid(arr, axis=0)
+
+    interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
+    a, b = _get_interval(interval_spec, axis, ndim)
+    if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
+        raise ValueError(
+            "The 'clenshaw-curtis' scheme requires interval [-1, 1] on each Lobatto axis."
+        )
+
+    nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
+    if nodes_spec is None:
+        n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
+        n_intervals = (
+            original_shape[axis] - 1 if n_intervals_spec is None else int(n_intervals_spec)
+        )
+        nodes = chebyshev_lobatto_nodes(n_intervals)
+    else:
+        nodes = np.asarray(nodes_spec, dtype=float)
+
+    if nodes.shape[0] != arr.shape[0]:
+        raise ValueError(
+            f"Along axis {axis}, array length {arr.shape[0]} does not match "
+            f"{nodes.shape[0]} Lobatto nodes."
+        )
+
+    m = _get_axis_option(scheme_options.get("m"), axis, ndim)
+    if m is None:
+        m = 0.0
+    moments = scheme_options.get("moments", "dct")
+    epsabs = scheme_options.get("epsabs", 1e-13)
+    epsrel = scheme_options.get("epsrel", 1e-13)
+
+    return np.apply_along_axis(
+        lambda values: integrate_weighted_clenshaw_curtis_from_values(
+            nodes, values, m, epsabs=epsabs, epsrel=epsrel, moments=moments
+        ),
+        axis=0,
+        arr=arr,
+    )
+
+
 def int_arr(arr, dxs=None, scheme="trapz", scheme_options=None):  # integrate an array of values on an integration domain
     arr = np.asarray(arr, dtype=float)
     if dxs is None:
@@ -789,13 +863,20 @@ def int_arr(arr, dxs=None, scheme="trapz", scheme_options=None):  # integrate an
     scheme_name = _integration_scheme_name(scheme)
     options = {} if scheme_options is None else dict(scheme_options)
     ndim = arr.ndim
+    original_shape = arr.shape
     current = arr
 
     for axis in range(ndim):
         if scheme_name == "trapz":
             current = np.trapezoid(current, axis=0)
         elif scheme_name == "truncated-grid":
-            current = _integrate_axis_truncated(current, axis=axis, ndim=ndim, scheme_options=options)
+            current = _integrate_axis_truncated(
+                current, axis=axis, ndim=ndim, scheme_options=options, original_shape=original_shape
+            )
+        elif scheme_name == "clenshaw-curtis":
+            current = _integrate_axis_clenshaw_curtis(
+                current, axis=axis, ndim=ndim, scheme_options=options, original_shape=original_shape
+            )
         else:
             raise ValueError(f"Unsupported integration scheme '{scheme_name}'.")
 
