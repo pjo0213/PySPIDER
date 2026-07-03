@@ -122,7 +122,7 @@ class Metric(object):
     n_dimensions: int = None # number of dimensions of space
     tensor: np.ndarray = None # 2d metric tensor
 
-    def __post_init(self):
+    def __post_init__(self):
         if self.tensor is None:
             self.tensor = np.eye(self.n_dimensions)
         elif self.n_dimensions is None:
@@ -392,6 +392,8 @@ class AbstractDataset(object): # template for structure of all data associated w
     metric_is_identity: bool = True
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
+
+    #Default choice of integration scheme and options initialization
     integration_scheme: str = "trapz"
     integration_options: dict[str, Any] = field(default_factory=dict)
 
@@ -727,12 +729,17 @@ def _get_interval(interval_spec, axis, ndim):
         return -1.0, 1.0
     if isinstance(interval_spec, (list, tuple)):
         if len(interval_spec) == 2 and all(np.isscalar(x) for x in interval_spec):
-            return float(interval_spec[0]), float(interval_spec[1])
-        if len(interval_spec) == ndim:
+            a, b = float(interval_spec[0]), float(interval_spec[1])
+        elif len(interval_spec) == ndim:
             axis_interval = interval_spec[axis]
             if not (isinstance(axis_interval, (list, tuple)) and len(axis_interval) == 2):
                 raise ValueError("Each axis interval must be a 2-tuple/list (a, b).")
-            return float(axis_interval[0]), float(axis_interval[1])
+            a, b = float(axis_interval[0]), float(axis_interval[1])
+        else:
+            raise ValueError("intervals must be either (a, b) or a list of per-axis (a, b) pairs.")
+        if a > b:
+            raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
+        return a, b
     raise ValueError("intervals must be either (a, b) or a list of per-axis (a, b) pairs.")
 
 
@@ -748,6 +755,14 @@ def _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options):
 
     n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
     if n_intervals_spec is None:
+        if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
+            raise ValueError(
+                f"Axis {axis}: integrating over the truncated interval [{a}, {b}] "
+                "requires either explicit 'nodes' or 'num_intervals' (the interval "
+                "count of the underlying reference Lobatto grid) in "
+                "integration_options; the node positions cannot be inferred from "
+                "the truncated data length alone."
+            )
         n_intervals = axis_size - 1
     else:
         n_intervals = int(n_intervals_spec)
@@ -756,7 +771,7 @@ def _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options):
 
 def _integrate_axis_truncated(arr, axis, ndim, scheme_options, original_shape):
     try:
-        from .chebyshev_integration import integrate as truncated_integrate
+        from .chebyshev_integration import quadrature_weights
     except ImportError as exc:
         raise ImportError(
             "The 'truncated-grid' integration scheme requires "
@@ -769,6 +784,12 @@ def _integrate_axis_truncated(arr, axis, ndim, scheme_options, original_shape):
 
     axis_size = original_shape[axis]
     nodes, a, b = _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options)
+    if nodes.shape[0] < 2:
+        raise ValueError(
+            f"Along axis {axis}, truncated-grid quadrature needs at least two "
+            f"Chebyshev nodes in [{a}, {b}]; got {nodes.shape[0]}. Increase "
+            "'num_intervals' or widen the integration interval."
+        )
     if nodes.shape[0] != arr.shape[0]:
         raise ValueError(
             f"Along axis {axis}, array length {arr.shape[0]} does not match "
@@ -781,28 +802,22 @@ def _integrate_axis_truncated(arr, axis, ndim, scheme_options, original_shape):
     envelope_m = _get_axis_option(scheme_options.get("envelope_m"), axis, ndim)
     degree = _get_axis_option(scheme_options.get("degree"), axis, ndim)
 
-    return np.apply_along_axis(
-        lambda values: truncated_integrate(
-            nodes,
-            values,
-            a,
-            b,
-            weight_func=weight_func,
-            m=m,
-            envelope_m=envelope_m,
-            degree=degree,
-        ),
-        axis=0,
-        arr=arr,
+    # The quadrature is linear in the samples, so compute the weight vector
+    # once per axis and contract, instead of re-solving the moment-matching
+    # system for every 1-D slice.
+    w = quadrature_weights(
+        nodes, a, b, weight_func=weight_func, m=m, envelope_m=envelope_m, degree=degree
     )
+    return np.tensordot(w, arr, axes=(0, 0))
 
 
 def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_shape):
-    """Integrate along one axis with DCT Clenshaw-Curtis on a full Lobatto grid."""
+    """Integrate along one axis with DCT Clenshaw-Curtis on a full mapped Lobatto grid."""
     try:
         from .chebyshev_integration import (
-            chebyshev_lobatto_nodes,
-            integrate_weighted_clenshaw_curtis_from_values,
+            clenshaw_curtis_weights_on_interval,
+            mapped_chebyshev_nodes,
+            _mapped_lobatto_reference_degree,
         )
     except ImportError as exc:
         raise ImportError(
@@ -816,10 +831,6 @@ def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_sh
 
     interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
     a, b = _get_interval(interval_spec, axis, ndim)
-    if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
-        raise ValueError(
-            "The 'clenshaw-curtis' scheme requires interval [-1, 1] on each Lobatto axis."
-        )
 
     nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
     if nodes_spec is None:
@@ -827,9 +838,15 @@ def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_sh
         n_intervals = (
             original_shape[axis] - 1 if n_intervals_spec is None else int(n_intervals_spec)
         )
-        nodes = chebyshev_lobatto_nodes(n_intervals)
+        nodes = mapped_chebyshev_nodes(n_intervals, a, b)
     else:
         nodes = np.asarray(nodes_spec, dtype=float)
+        if _mapped_lobatto_reference_degree(nodes, a, b) is None:
+            raise ValueError(
+                f"Axis {axis}: 'clenshaw-curtis' requires the full mapped "
+                f"Chebyshev-Lobatto node set on [{a}, {b}] (ascending or "
+                "descending). Use 'truncated-grid' for partial node sets."
+            )
 
     if nodes.shape[0] != arr.shape[0]:
         raise ValueError(
@@ -837,20 +854,25 @@ def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_sh
             f"{nodes.shape[0]} Lobatto nodes."
         )
 
-    m = _get_axis_option(scheme_options.get("m"), axis, ndim)
-    if m is None:
-        m = 0.0
+    jacobi_m = _get_axis_option(scheme_options.get("m"), axis, ndim)
+    if jacobi_m is None:
+        jacobi_m = 0.0
+    envelope_m = _get_axis_option(scheme_options.get("envelope_m"), axis, ndim)
     moments = scheme_options.get("moments", "dct")
     epsabs = scheme_options.get("epsabs", 1e-13)
     epsrel = scheme_options.get("epsrel", 1e-13)
 
-    return np.apply_along_axis(
-        lambda values: integrate_weighted_clenshaw_curtis_from_values(
-            nodes, values, m, epsabs=epsabs, epsrel=epsrel, moments=moments
-        ),
-        axis=0,
-        arr=arr,
+    w = clenshaw_curtis_weights_on_interval(
+        a,
+        b,
+        nodes.shape[0] - 1,
+        envelope_m=envelope_m,
+        m=float(jacobi_m),
+        moments=moments,
+        epsabs=epsabs,
+        epsrel=epsrel,
     )
+    return np.tensordot(w, arr, axes=(0, 0))
 
 
 def int_arr(arr, dxs=None, scheme="trapz", scheme_options=None):  # integrate an array of values on an integration domain

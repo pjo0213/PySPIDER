@@ -82,3 +82,9 @@ cheb_test/
 
 src/PySPIDER/discrete/PySPIDER.code-workspace
 *.json
+
+# Conda environment
+environment.yml
+
+# Presentation data
+presentations/
