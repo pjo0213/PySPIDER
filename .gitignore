@@ -88,3 +88,6 @@ environment.yml
 
 # Presentation data
 presentations/
+
+# More Chebyshev tests
+tests/
