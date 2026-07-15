@@ -755,9 +755,10 @@ def sparse_reg_bf(
         w_inds = np.array(range(w))
         terms = w_inds[xi!=0]
         residual.set_norm(np.linalg.norm(theta[:, terms]))
-        lambd, lambda1 = lambd/residual.norm, lambda1/residual.norm
+        # single-term model residuals should not be rescaled
+        lambd, lambda1 = lambd/residual.norm, lambda1
         lambda_test, lambda1_test = (
-            (lambda_test/residual.norm, lambda1_test/residual.norm) 
+            (lambda_test/residual.norm, lambda1_test) 
             if h_test>0 else (None, None)
         )
     
