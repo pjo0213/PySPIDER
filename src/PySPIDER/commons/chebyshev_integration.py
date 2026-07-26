@@ -342,42 +342,6 @@ def compute_moments(
 
     return _moments_via_quad(a, b, max_degree, weight_func)
 
-def _full_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
-    """
-    Return N when nodes are Chebyshev-Lobatto on [-1, 1], else None.
-
-    Both descending (natural cos(pi*j/N)) and ascending orderings are
-    accepted: the Jacobi weight (1-x^2)^m is even, so Clenshaw-Curtis on the
-    reversed samples yields the same integral.
-
-    Parameters
-    ----------
-    nodes : np.ndarray
-        Candidate quadrature nodes.
-    a : float
-        Left integration endpoint.
-    b : float
-        Right integration endpoint.
-
-    Returns
-    -------
-    int or None
-        Reference interval count N with N+1 nodes, or None if not a match.
-    """
-    nodes = np.asarray(nodes, dtype=float)
-    if nodes.size < 2:
-        return None
-    if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
-        return None
-    N = nodes.shape[0] - 1
-    expected = chebyshev_lobatto_nodes(N)
-    if np.allclose(nodes, expected, rtol=0, atol=1e-12):
-        return N
-    if np.allclose(nodes, expected[::-1], rtol=0, atol=1e-12):
-        return N
-    return None
-
-
 def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
     Return N when nodes are a full Lobatto grid affinely mapped onto [a, b].
@@ -396,7 +360,6 @@ def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> O
         return N
     return None
 
-
 def _interval_cc_scale_and_ref_m(
     a: float,
     b: float,
@@ -411,64 +374,6 @@ def _interval_cc_scale_and_ref_m(
     if np.isclose(a, -1.0) and np.isclose(b, 1.0):
         return 1.0, float(jacobi_m)
     return 0.5 * (b - a), 0.0
-
-def integrate_weighted_clenshaw_curtis_from_values(
-    x: np.ndarray,
-    f_values: np.ndarray,
-    m: float,
-    epsabs: float = 1e-13,
-    epsrel: float = 1e-13,
-    moments: str = "dct",
-) -> float:
-    """
-    Integrate a Jacobi-weighted function from full Lobatto-grid samples.
-
-    Computes integral_{-1}^{1} (1-x^2)^m f(x) dx as the dot product of the
-    Chebyshev coefficients of f with the weighted moments. The samples must lie
-    on a complete Lobatto grid cos(pi*j/N).
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Chebyshev-Lobatto nodes of length N+1.
-    f_values : np.ndarray
-        Samples of f at x.
-    m : float
-        Weight exponent in (1-x^2)^m.
-    epsabs : float, optional
-        Absolute tolerance for QUADPACK moments.
-    epsrel : float, optional
-        Relative tolerance for QUADPACK moments.
-    moments : str, optional
-        Moment backend, 'dct' or 'quadpack'.
-
-    Returns
-    -------
-    float
-        Approximation to the weighted integral.
-    """
-    x = np.asarray(x, dtype=float)
-    f_values = np.asarray(f_values, dtype=float)
-    if x.shape != f_values.shape:
-        raise ValueError("x and f_values must have the same shape")
-    N = x.shape[0] - 1
-    if N < 1:
-        raise ValueError("Require at least N>=1 (two points)")
-    if _full_lobatto_reference_degree(x, -1.0, 1.0) is None:
-        raise ValueError(
-            "x must be the full Chebyshev-Lobatto node set cos(pi*j/N), j=0..N, "
-            "on [-1, 1] (ascending or descending order)."
-        )
-
-    a = chebyshev_coefficients_from_values(f_values)
-    if moments == "quadpack":
-        mu = jacobi_weighted_moments_T(m, N, epsabs=epsabs, epsrel=epsrel)
-    elif moments == "dct":
-        mu = jacobi_weighted_moments_T_dct(m, N)
-    else:
-        raise ValueError("moments must be 'quadpack' or 'dct'")
-
-    return float(np.dot(a, mu))
 
 @lru_cache(maxsize=128)
 def clenshaw_curtis_weights(
@@ -528,7 +433,6 @@ def clenshaw_curtis_weights(
     w.setflags(write=False)
     return w
 
-
 @lru_cache(maxsize=128)
 def clenshaw_curtis_weights_on_interval(
     a: float,
@@ -560,56 +464,6 @@ def clenshaw_curtis_weights_on_interval(
         num_intervals, m=ref_m, moments=moments, epsabs=epsabs, epsrel=epsrel
     )
     return w
-
-
-def integrate_clenshaw_curtis_on_interval(
-    a: float,
-    b: float,
-    f_values: np.ndarray,
-    *,
-    nodes: Optional[np.ndarray] = None,
-    envelope_m: Optional[float] = None,
-    m: float = 0.0,
-    moments: str = "dct",
-    epsabs: float = 1e-13,
-    epsrel: float = 1e-13,
-) -> float:
-    """
-    Integrate from Lobatto-grid samples on [a, b] via affine Clenshaw-Curtis.
-
-    Samples must lie on mapped_chebyshev_nodes(N, a, b) (ascending or
-    descending). Computes unweighted, envelope-weighted, or (on [-1, 1] only)
-    Jacobi-weighted integrals using the DCT reference rule and the affine
-    scaling factor.
-    """
-    _validate_interval(a, b)
-    f_values = np.asarray(f_values, dtype=float)
-    N = f_values.shape[0] - 1
-    if N < 1:
-        raise ValueError("Require at least N>=1 (two points)")
-    if nodes is None:
-        nodes = mapped_chebyshev_nodes(N, a, b)
-    else:
-        nodes = np.asarray(nodes, dtype=float)
-    if nodes.shape != f_values.shape:
-        raise ValueError("nodes and f_values must have the same shape")
-    if _mapped_lobatto_reference_degree(nodes, a, b) is None:
-        raise ValueError(
-            "nodes must be the full mapped Chebyshev-Lobatto set on "
-            f"[{a}, {b}] (ascending or descending order)."
-        )
-    w = clenshaw_curtis_weights_on_interval(
-        a,
-        b,
-        N,
-        envelope_m=envelope_m,
-        m=m,
-        moments=moments,
-        epsabs=epsabs,
-        epsrel=epsrel,
-    )
-    return float(np.dot(w, f_values))
-
 
 def _chebyshev_basis_matrix(x: np.ndarray, max_degree: int) -> np.ndarray:
     """
@@ -693,79 +547,3 @@ def quadrature_weights(
     V = _chebyshev_basis_matrix(nodes, degree)
     mu = compute_moments(a, b, degree, weight_func=weight_func, m=m, envelope_m=envelope_m)
     return np.linalg.lstsq(V.T, mu, rcond=None)[0]
-
-def integrate(
-    nodes: np.ndarray,
-    f_values: np.ndarray,
-    a: Optional[float] = None,
-    b: Optional[float] = None,
-    *,
-    weight_func: Optional[Callable] = None,
-    m: Optional[float] = None,
-    envelope_m: Optional[float] = None,
-    degree: Optional[int] = None,
-) -> float:
-    """
-    Integrate a function from nodal values on arbitrary nodes in [a, b].
-
-    Computes integral_a^b w(x) f(x) dx by forming the quadrature weights for
-    nodes and contracting them with the sample values.
-
-    Parameters
-    ----------
-    nodes : np.ndarray
-        Quadrature nodes in [a, b].
-    f_values : np.ndarray
-        Samples of f at nodes.
-    a : float, optional
-        Left endpoint; defaults to min(nodes).
-    b : float, optional
-        Right endpoint; defaults to max(nodes).
-    weight_func : callable, optional
-        Arbitrary weight function w(x).
-    m : float, optional
-        Exponent of the Jacobi weight (1-x^2)^m.
-    envelope_m : float, optional
-        Exponent of the endpoint envelope weight.
-    degree : int, optional
-        Polynomial degree to match; defaults to len(nodes) - 1.
-
-    Returns
-    -------
-    float
-        Approximation to the weighted integral.
-    """
-    nodes = np.asarray(nodes, dtype=float)
-    f_values = np.asarray(f_values, dtype=float)
-
-    if a is None:
-        a = float(nodes.min())
-    if b is None:
-        b = float(nodes.max())
-
-    # Full mapped Lobatto grid: O(N log N) affine Clenshaw-Curtis fast path.
-    # Skipped when an explicit degree is requested or for arbitrary weight_func.
-    if weight_func is None and degree is None:
-        if _mapped_lobatto_reference_degree(nodes, a, b) is not None:
-            jacobi_m = 0.0 if m is None else float(m)
-            if envelope_m is not None:
-                return integrate_clenshaw_curtis_on_interval(
-                    a,
-                    b,
-                    f_values,
-                    nodes=nodes,
-                    envelope_m=envelope_m,
-                    moments="dct",
-                )
-            if m is None or np.isclose(a, -1.0) and np.isclose(b, 1.0):
-                return integrate_clenshaw_curtis_on_interval(
-                    a,
-                    b,
-                    f_values,
-                    nodes=nodes,
-                    m=jacobi_m,
-                    moments="dct",
-                )
-
-    w = quadrature_weights(nodes, a, b, weight_func=weight_func, m=m, envelope_m=envelope_m, degree=degree)
-    return float(np.dot(w, f_values))
