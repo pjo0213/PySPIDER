@@ -16,6 +16,7 @@ from .z3base import (
 )
 from .library import LibraryTerm, ConstantTerm, Observable, ES_prod
 from .weight import weight_1d
+from .integration import int_arr
 
 # if we want to use integration domains with different sizes & spacings, it might be
 # better to store that information within this object as well
@@ -393,7 +394,41 @@ class AbstractDataset(object): # template for structure of all data associated w
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
 
-    #Default choice of integration scheme and options initialization
+    # Choice of integration scheme and its per-scheme options, used by int_arr()
+    # in eval_on_domain(). Supported integration_scheme strings:
+    #   "trapezoidal"      (default) - np.trapezoid on a unit-spacing index grid.
+    #   "simpson"          - composite Simpson's rule on a unit-spacing grid.
+    #                        options: simpson_axes (default [0]).
+    #   "newton-cotes"     - composite closed Newton-Cotes (order=4 is Boole's rule)
+    #                        on a unit-spacing grid; the order is automatically
+    #                        reduced to the largest one that evenly tiles the axis.
+    #                        options: newton_cotes_axes (default [0]), order (default 4).
+    #   "gauss-legendre"   - N-point Gauss-Legendre quadrature; requires data sampled
+    #                        at the Gauss-Legendre nodes for that axis length.
+    #                        options: gauss_axes (default [0]), interval/intervals,
+    #                        nodes (optional, validated against the expected grid).
+    #   "truncated-cc-grid" - moment-matching quadrature defaulting to a (sub)grid of
+    #                        Chebyshev-Lobatto nodes when no explicit nodes are given.
+    #                        options: truncated_axes (default [0]), interval/intervals,
+    #                        nodes, num_intervals, weight_func, m, envelope_m, degree.
+    #   "clenshaw-curtis"  - DCT-based Clenshaw-Curtis quadrature on a full mapped
+    #                        Chebyshev-Lobatto grid.
+    #                        options: lobatto_axes (default [0]), interval/intervals,
+    #                        nodes, num_intervals, m, envelope_m, moments, epsabs, epsrel.
+    #   "moment-matching"  - generalized moment-matching quadrature for arbitrary or
+    #                        scattered node sets; unlike "truncated-cc-grid" it never
+    #                        infers node positions, so both nodes and the true
+    #                        interval must always be supplied explicitly.
+    #                        options: moment_matching_axes (default [0]), nodes
+    #                        (required), interval/intervals (required), weight_func,
+    #                        m, envelope_m, degree.
+    #   "cubic-spline"     - fit a cubic spline through (possibly non-uniform) samples
+    #                        and integrate it exactly; works for arbitrary node sets
+    #                        and also as a drop-in for uniform data (defaults to a
+    #                        unit-spacing index grid when no nodes are given).
+    #                        options: spline_axes (default [0]), nodes, interval/intervals,
+    #                        bc_type (default "not-a-knot"; "periodic" is unsupported).
+    # Axes not selected by a scheme's *_axes option fall back to trapezoidal.
     integration_scheme: str = "trapezoidal"
     integration_options: dict[str, Any] = field(default_factory=dict)
 
@@ -691,165 +726,6 @@ def get_slice(arr, domain):
         idx[slice_dim] = slice(min_c, max_c + 1)
         arr_slice = arr_slice[tuple(idx)]
     return arr_slice
-
-def _get_axis_option(value, axis, ndim):
-    # per-axis options may be given as a list/tuple with one entry per axis
-    if isinstance(value, (list, tuple)) and len(value) == ndim:
-        return value[axis]
-    return value
-
-
-def _get_interval(interval_spec, axis, ndim):
-    # interval_spec is either a single (a, b) pair or a list of per-axis pairs
-    if interval_spec is None:
-        return -1.0, 1.0
-    if len(interval_spec) == 2 and all(np.isscalar(x) for x in interval_spec):
-        a, b = interval_spec
-    else:
-        a, b = interval_spec[axis]
-    return float(a), float(b)
-
-
-def _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options):
-    """Nodes for Chebyshev quadrature along one logical axis."""
-    interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
-    a, b = _get_interval(interval_spec, axis, ndim)
-    nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
-    if nodes_spec is not None:
-        return np.asarray(nodes_spec, dtype=float), a, b
-
-    from .chebyshev_integration import truncated_chebyshev_nodes
-
-    n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
-    if n_intervals_spec is None:
-        if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
-            raise ValueError(
-                f"Axis {axis}: integrating over the truncated interval [{a}, {b}] "
-                "requires either explicit 'nodes' or 'num_intervals' (the interval "
-                "count of the underlying reference Lobatto grid) in "
-                "integration_options; the node positions cannot be inferred from "
-                "the truncated data length alone."
-            )
-        n_intervals = axis_size - 1
-    else:
-        n_intervals = int(n_intervals_spec)
-    return truncated_chebyshev_nodes(n_intervals, a, b), a, b
-
-
-def _integrate_axis_truncated(arr, axis, ndim, scheme_options, original_shape):
-    from .chebyshev_integration import quadrature_weights
-
-    truncated_axes = scheme_options.get("truncated_axes", [0])
-    if axis not in truncated_axes:
-        return np.trapezoid(arr, axis=0)
-
-    axis_size = original_shape[axis]
-    nodes, a, b = _chebyshev_axis_nodes(axis, ndim, axis_size, scheme_options)
-    if nodes.shape[0] != arr.shape[0]:
-        raise ValueError(
-            f"Along axis {axis}, array length {arr.shape[0]} does not match "
-            f"{nodes.shape[0]} Chebyshev nodes. Pass explicit 'nodes' in "
-            "integration_options or slice data to the truncated node set."
-        )
-
-    weight_func = _get_axis_option(scheme_options.get("weight_func"), axis, ndim)
-    m = _get_axis_option(scheme_options.get("m"), axis, ndim)
-    envelope_m = _get_axis_option(scheme_options.get("envelope_m"), axis, ndim)
-    degree = _get_axis_option(scheme_options.get("degree"), axis, ndim)
-
-    # The quadrature is linear in the samples, so compute the weight vector
-    # once per axis and contract, instead of re-solving the moment-matching
-    # system for every 1-D slice.
-    w = quadrature_weights(
-        nodes, a, b, weight_func=weight_func, m=m, envelope_m=envelope_m, degree=degree
-    )
-    return np.tensordot(w, arr, axes=(0, 0))
-
-
-def _integrate_axis_clenshaw_curtis(arr, axis, ndim, scheme_options, original_shape):
-    """Integrate along one axis with DCT Clenshaw-Curtis on a full mapped Lobatto grid."""
-    from .chebyshev_integration import (
-        clenshaw_curtis_weights_on_interval,
-        mapped_chebyshev_nodes,
-        _mapped_lobatto_reference_degree,
-    )
-
-    lobatto_axes = scheme_options.get("lobatto_axes", [0])
-    if axis not in lobatto_axes:
-        return np.trapezoid(arr, axis=0)
-
-    interval_spec = scheme_options.get("intervals", scheme_options.get("interval"))
-    a, b = _get_interval(interval_spec, axis, ndim)
-
-    nodes_spec = _get_axis_option(scheme_options.get("nodes"), axis, ndim)
-    if nodes_spec is None:
-        n_intervals_spec = _get_axis_option(scheme_options.get("num_intervals"), axis, ndim)
-        n_intervals = (
-            original_shape[axis] - 1 if n_intervals_spec is None else int(n_intervals_spec)
-        )
-        nodes = mapped_chebyshev_nodes(n_intervals, a, b)
-    else:
-        nodes = np.asarray(nodes_spec, dtype=float)
-        if _mapped_lobatto_reference_degree(nodes, a, b) is None:
-            raise ValueError(
-                f"Axis {axis}: 'clenshaw-curtis' requires the full mapped "
-                f"Chebyshev-Lobatto node set on [{a}, {b}] (ascending or "
-                "descending). Use 'truncated-cc-grid' for partial node sets."
-            )
-
-    if nodes.shape[0] != arr.shape[0]:
-        raise ValueError(
-            f"Along axis {axis}, array length {arr.shape[0]} does not match "
-            f"{nodes.shape[0]} Lobatto nodes."
-        )
-
-    jacobi_m = _get_axis_option(scheme_options.get("m"), axis, ndim)
-    if jacobi_m is None:
-        jacobi_m = 0.0
-    envelope_m = _get_axis_option(scheme_options.get("envelope_m"), axis, ndim)
-    moments = scheme_options.get("moments", "dct")
-    epsabs = scheme_options.get("epsabs", 1e-13)
-    epsrel = scheme_options.get("epsrel", 1e-13)
-
-    w = clenshaw_curtis_weights_on_interval(
-        a,
-        b,
-        nodes.shape[0] - 1,
-        envelope_m=envelope_m,
-        m=float(jacobi_m),
-        moments=moments,
-        epsabs=epsabs,
-        epsrel=epsrel,
-    )
-    return np.tensordot(w, arr, axes=(0, 0))
-
-
-def int_arr(arr, dxs=None, scheme="trapezoidal", scheme_options=None):  # integrate an array of values on an integration domain
-    # dxs is accepted for API compatibility but the grid spacing is absorbed by the weight functions
-    arr = np.asarray(arr, dtype=float)
-    options = {} if scheme_options is None else dict(scheme_options)
-    ndim = arr.ndim
-    original_shape = arr.shape
-    current = arr
-
-    for axis in range(ndim):
-        if scheme == "trapezoidal":
-            current = np.trapezoid(current, axis=0)
-        elif scheme == "truncated-cc-grid":
-            current = _integrate_axis_truncated(
-                current, axis=axis, ndim=ndim, scheme_options=options, original_shape=original_shape
-            )
-        elif scheme == "clenshaw-curtis":
-            current = _integrate_axis_clenshaw_curtis(
-                current, axis=axis, ndim=ndim, scheme_options=options, original_shape=original_shape
-            )
-        else:
-            raise ValueError(
-                f"Unsupported integration scheme '{scheme}'. "
-                "Supported: 'trapezoidal', 'truncated-cc-grid', 'clenshaw-curtis'."
-            )
-
-    return current
 
 def int_by_parts(term, weight, by_parts=True, dim=0):
     if weight.scale == 0 or not by_parts: # no point - the weight is zero anyway or we were asked not to
