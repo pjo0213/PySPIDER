@@ -1,10 +1,215 @@
+"""1-D quadrature node/weight builders for every integration scheme PySPIDER supports.
+
+This module is the single home for the pure numerical-quadrature logic behind
+each ``integration_scheme`` string: trapezoidal, Simpson, composite
+Newton-Cotes/Boole, Gauss-Legendre, Chebyshev/Clenshaw-Curtis (including the
+underlying DCT/moment machinery), generalized moment-matching for arbitrary
+node sets, and cubic-spline quadrature. Everything here is plain numerics -
+no dependency on PySPIDER's data structures (``IntegrationDomain``,
+``AbstractDataset``, etc.). Most builders return a weight vector ``w`` such
+that ``sum_i w_i * f(x_i)`` approximates the target integral; the PySPIDER-
+specific glue that decides which builder to call for a given array axis and
+``scheme_options`` lives in ``integration.py``.
+"""
+
 from functools import lru_cache
 from typing import Callable, Optional
 
 import numpy as np
 from numpy.polynomial.chebyshev import chebval
 from scipy.fft import dct
-from scipy.integrate import quad
+from scipy.integrate import newton_cotes, quad, simpson
+from scipy.interpolate import CubicSpline
+
+
+# ---------------------------------------------------------------------------
+# Trapezoidal
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=128)
+def trapezoidal_weights(num_points: int) -> np.ndarray:
+    """
+    Composite trapezoidal quadrature weights on a unit-spacing grid.
+
+    Returns weights ``w`` such that ``sum_i w_i * f_i`` approximates the
+    integral of ``f`` over ``[0, num_points - 1]`` given samples at the
+    integers ``0, ..., num_points - 1``. Equivalent to
+    `newton_cotes_weights` with ``order=1``; provided separately since the
+    trapezoidal rule is PySPIDER's default scheme.
+
+    Parameters
+    ----------
+    num_points : int
+        Number of sample points; must be >= 2.
+
+    Returns
+    -------
+    np.ndarray
+        Read-only array of ``num_points`` quadrature weights.
+    """
+    if num_points < 2:
+        raise ValueError("num_points must be >= 2")
+    weights = np.ones(num_points, dtype=float)
+    weights[0] = 0.5
+    weights[-1] = 0.5
+    weights.setflags(write=False)
+    return weights
+
+
+# ---------------------------------------------------------------------------
+# Simpson
+# ---------------------------------------------------------------------------
+
+
+def simpson_integrate(values: np.ndarray, axis: int = 0) -> np.ndarray:
+    """
+    Composite Simpson's rule on a unit-spacing grid, applied along one axis.
+
+    Thin wrapper around `scipy.integrate.simpson` (unit spacing) so that the
+    choice of Simpson backend - which already handles an odd number of
+    intervals gracefully - lives alongside the other quadrature schemes
+    rather than in the PySPIDER-specific dispatch layer.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Sampled values.
+    axis : int, optional
+        Axis along which to integrate.
+
+    Returns
+    -------
+    np.ndarray
+        `values` integrated along `axis`.
+    """
+    return simpson(values, axis=axis)
+
+
+# ---------------------------------------------------------------------------
+# Composite Newton-Cotes (including Boole's rule)
+# ---------------------------------------------------------------------------
+
+
+def newton_cotes_panel_order(num_points: int, max_order: int = 4) -> int:
+    """
+    Return the largest closed Newton-Cotes panel order that evenly tiles the grid.
+
+    A composite closed Newton-Cotes rule of panel order ``k`` needs ``k+1``
+    points per panel and can only tile a grid of ``num_points`` points
+    (``num_points - 1`` intervals) when ``k`` divides ``num_points - 1``
+    evenly. This returns the largest ``k <= max_order`` (and ``k <=
+    num_points - 1``) satisfying that constraint, falling back to ``k = 1``
+    (the trapezoidal rule) when nothing larger divides evenly.
+
+    Parameters
+    ----------
+    num_points : int
+        Number of sample points; must be >= 2.
+    max_order : int, optional
+        Largest panel order to consider.
+
+    Returns
+    -------
+    int
+        The selected panel order, in ``[1, max_order]``.
+    """
+    if num_points < 2:
+        raise ValueError("num_points must be >= 2")
+    if max_order < 1:
+        raise ValueError("max_order must be >= 1")
+    n_intervals = num_points - 1
+    upper = min(max_order, n_intervals)
+    for order in range(upper, 0, -1):
+        if n_intervals % order == 0:
+            return order
+    return 1  # unreachable: order=1 always divides n_intervals
+
+
+@lru_cache(maxsize=128)
+def newton_cotes_weights(num_points: int, order: int = 4) -> np.ndarray:
+    """
+    Composite closed Newton-Cotes quadrature weights on a unit-spacing grid.
+
+    Returns weights ``w`` such that ``sum_i w_i * f_i`` approximates the
+    integral of ``f`` over ``[0, num_points - 1]`` given samples at the
+    integers ``0, ..., num_points - 1``. The grid is tiled with panels of
+    ``order`` intervals each (``order = 4`` is Boole's rule, ``order = 2`` is
+    Simpson's rule, ``order = 1`` is the trapezoidal rule); if ``order``
+    does not evenly divide ``num_points - 1``, the largest order that does
+    (see `newton_cotes_panel_order`) is used instead, so the rule always
+    succeeds regardless of axis length.
+
+    Parameters
+    ----------
+    num_points : int
+        Number of sample points; must be >= 2.
+    order : int, optional
+        Requested panel order (points per panel minus one).
+
+    Returns
+    -------
+    np.ndarray
+        Read-only array of ``num_points`` quadrature weights.
+    """
+    actual_order = newton_cotes_panel_order(num_points, max_order=order)
+    an, _ = newton_cotes(actual_order, equal=1)
+    weights = np.zeros(num_points, dtype=float)
+    n_intervals = num_points - 1
+    n_panels = n_intervals // actual_order
+    for k in range(n_panels):
+        start = k * actual_order
+        weights[start : start + actual_order + 1] += an
+    weights.setflags(write=False)
+    return weights
+
+
+# ---------------------------------------------------------------------------
+# Gauss-Legendre
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=128)
+def gauss_legendre_nodes_and_weights(N: int, a: float, b: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    N-point Gauss-Legendre nodes and weights on ``[a, b]``.
+
+    Returns nodes and weights such that ``sum_i w_i * f(x_i)`` approximates
+    ``integral_a^b f(x) dx`` exactly for polynomials of degree up to
+    ``2N - 1``. Computed via `numpy.polynomial.legendre.leggauss` on
+    ``[-1, 1]`` and affinely mapped onto ``[a, b]``.
+
+    Parameters
+    ----------
+    N : int
+        Number of nodes; must be >= 1.
+    a : float
+        Left endpoint of the interval.
+    b : float
+        Right endpoint of the interval.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Read-only ``(nodes, weights)`` arrays of length ``N``, ascending in ``x``.
+    """
+    if N < 1:
+        raise ValueError("N must be >= 1")
+    if a > b:
+        raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
+    x, w = np.polynomial.legendre.leggauss(N)
+    scale = 0.5 * (b - a)
+    nodes = 0.5 * (a + b) + scale * x
+    weights = scale * w
+    nodes.setflags(write=False)
+    weights.setflags(write=False)
+    return nodes, weights
+
+
+# ---------------------------------------------------------------------------
+# Chebyshev / Clenshaw-Curtis and generalized moment-matching quadrature
+# ---------------------------------------------------------------------------
+
 
 def chebyshev_lobatto_nodes(N: int) -> np.ndarray:
     """
@@ -390,9 +595,9 @@ def clenshaw_curtis_weights(
     (1-x^2)^m f(x) dx for f sampled at the Lobatto nodes x_j = cos(pi*j/N),
     j = 0..N (descending order). The weights are the DCT-I coefficient map
     contracted with the weighted moments, so a single dot product reproduces
-    integrate_weighted_clenshaw_curtis_from_values exactly. Because the
-    Jacobi weight is even, the weight vector is symmetric and applies
-    unchanged to samples stored in ascending node order.
+    the weighted integral exactly. Because the Jacobi weight is even, the
+    weight vector is symmetric and applies unchanged to samples stored in
+    ascending node order.
 
     Parameters
     ----------
@@ -509,7 +714,10 @@ def quadrature_weights(
 
     Solves the (least-squares) moment-matching system V^T w = mu, where V is
     the Chebyshev basis matrix at nodes and mu are the weighted moments on
-    [a, b].
+    [a, b]. This is the generalization used both by PySPIDER's Chebyshev
+    schemes (with `nodes` restricted to a Chebyshev-Lobatto (sub)grid) and by
+    the fully general "moment-matching" scheme (with arbitrary/scattered
+    `nodes`).
 
     Parameters
     ----------
@@ -547,3 +755,75 @@ def quadrature_weights(
     V = _chebyshev_basis_matrix(nodes, degree)
     mu = compute_moments(a, b, degree, weight_func=weight_func, m=m, envelope_m=envelope_m)
     return np.linalg.lstsq(V.T, mu, rcond=None)[0]
+
+
+# ---------------------------------------------------------------------------
+# Cubic-spline
+# ---------------------------------------------------------------------------
+
+
+def spline_quadrature_weights(
+    nodes: np.ndarray, a: float, b: float, bc_type: str = "not-a-knot"
+) -> np.ndarray:
+    """
+    Cubic-spline quadrature weights for arbitrary (possibly non-uniform) nodes.
+
+    Fits a cubic spline through ``(nodes_i, f_i)`` for arbitrary sample
+    coordinates ``nodes`` (uniform or not) and returns the weight vector
+    ``w`` such that ``sum_i w_i * f_i`` equals the exact integral of that
+    spline over ``[a, b]``. The weight vector is obtained in a single
+    vectorized `scipy.interpolate.CubicSpline` fit against an identity
+    right-hand side (one unit impulse per node) rather than refitting for
+    every data column, then calling `.integrate`.
+
+    Parameters
+    ----------
+    nodes : np.ndarray
+        Sample coordinates; may be ascending, descending, or unordered, but
+        must be distinct.
+    a : float
+        Left endpoint of integration.
+    b : float
+        Right endpoint of integration.
+    bc_type : str, optional
+        Boundary condition passed to `scipy.interpolate.CubicSpline`
+        (default ``'not-a-knot'``; SciPy degrades this gracefully to lower
+        order for short axes, e.g. 2-3 nodes). ``'periodic'`` is rejected: it
+        requires the first and last sampled values to match, which is
+        incompatible with computing a reusable weight vector from an
+        identity right-hand side.
+
+    Returns
+    -------
+    np.ndarray
+        Quadrature weights aligned with the original (unsorted) `nodes` order.
+    """
+    nodes = np.asarray(nodes, dtype=float)
+    N = nodes.shape[0]
+    if N < 2:
+        raise ValueError("spline_quadrature_weights requires at least 2 nodes")
+    if a > b:
+        raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
+    if bc_type == "periodic":
+        raise ValueError(
+            "bc_type='periodic' is not supported by spline_quadrature_weights: it "
+            "requires matching endpoint samples, which cannot hold for the "
+            "identity-matrix basis used to build a reusable weight vector."
+        )
+
+    order = np.argsort(nodes)
+    x_sorted = nodes[order]
+    if np.any(np.diff(x_sorted) <= 0):
+        raise ValueError("spline_quadrature_weights requires distinct node coordinates")
+
+    try:
+        cs = CubicSpline(x_sorted, np.eye(N), axis=0, bc_type=bc_type)
+    except ValueError as exc:
+        raise ValueError(
+            f"Could not build a cubic spline with bc_type={bc_type!r} for {N} node(s)."
+        ) from exc
+
+    v = cs.integrate(a, b)
+    w = np.empty(N, dtype=float)
+    w[order] = v
+    return w
