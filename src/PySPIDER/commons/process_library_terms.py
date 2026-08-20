@@ -16,6 +16,7 @@ from .z3base import (
 )
 from .library import LibraryTerm, ConstantTerm, Observable, ES_prod
 from .weight import weight_1d
+from .integration import int_arr
 
 # if we want to use integration domains with different sizes & spacings, it might be
 # better to store that information within this object as well
@@ -393,6 +394,18 @@ class AbstractDataset(object): # template for structure of all data associated w
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
 
+    # Quadrature for eval_on_domain() / int_arr(). Axis (int) -> {scheme: options}.
+    # Omitted axes use trapezoidal. See int_arr for options.
+    #   "trapezoidal"       composite trapezoidal rule
+    #   "newton-cotes"      composite closed Newton-Cotes
+    #   "gauss-legendre"    data at Gauss-Legendre nodes
+    #   "truncated-cc-grid" Chebyshev subgrid
+    #   "clenshaw-curtis"   full Lobatto grid
+    #   "moment-matching"   arbitrary nodes
+    #   "cubic-spline"      cubic spline integral
+    # e.g. {0: {"newton-cotes": {"order": 4}}, 2: {"clenshaw-curtis": {"interval": [-1, 1]}}}
+    schemes_and_options: dict = field(default_factory=dict)
+
     def __post_init__(self):
         self.n_dimensions = len(self.world_size) # number of dimensions (spatial + temporal)
         # consider n_spatial_dim field
@@ -487,7 +500,7 @@ class AbstractDataset(object): # template for structure of all data associated w
                 print("ARRAY IS 0")
             #else:
             #    print("MIDDLE NZ VALUE OF ARRAY:", '{:.2E}'.format(filtered_flat[lenf//2])) # middle of the array
-        result = int_arr(term_weight_product, dxs=self.dxs)
+        result = int_arr(term_weight_product, self.schemes_and_options)
         #if debug:
         #    print('Integrated result', result)
         return result
@@ -682,16 +695,6 @@ def get_slice(arr, domain):
         idx[slice_dim] = slice(min_c, max_c + 1)
         arr_slice = arr_slice[tuple(idx)]
     return arr_slice
-
-def int_arr(arr, dxs=None):  # integrate an array of values on an integration domain
-    if dxs is None:
-        dxs = [1] * len(arr.shape)
-    dx = dxs[0]
-    integral = np.trapz(arr, axis=0)
-    if len(dxs) == 1:
-        return integral
-    else:
-        return int_arr(integral, dxs[1:])
 
 def int_by_parts(term, weight, by_parts=True, dim=0):
     if weight.scale == 0 or not by_parts: # no point - the weight is zero anyway or we were asked not to
