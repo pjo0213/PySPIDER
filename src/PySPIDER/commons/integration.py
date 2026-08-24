@@ -4,23 +4,17 @@ import numpy as np
 
 from .quadrature_schemes import (
     clenshaw_curtis_weights_on_interval,
-    gauss_legendre_nodes_and_weights,
     mapped_chebyshev_nodes,
-    newton_cotes_weights,
     moment_matched_quad_weights,
-    spline_quadrature_weights,
     truncated_chebyshev_nodes,
     _mapped_lobatto_reference_degree,
 )
 
 SUPPORTED_SCHEMES = (
     "trapezoidal",
-    "newton-cotes",
-    "gauss-legendre",
     "truncated-cc-grid",
     "clenshaw-curtis",
     "moment-matching",
-    "cubic-spline",
 )
 
 
@@ -31,6 +25,8 @@ def _interval(opts, default=None):
 
 def _nodes(opts):
     spec = opts.get("nodes")
+    if spec is None:
+        return None
     return np.asarray(spec, dtype=float)
 
 
@@ -86,31 +82,6 @@ def _clenshaw_curtis(arr, opts):
     return _dot(w, arr)
 
 
-def _newton_cotes(arr, opts):
-    w = newton_cotes_weights(arr.shape[0], order=int(opts.get("order", 4)))
-    return _dot(w, arr)
-
-
-def _gauss_legendre(arr, opts):
-    n = arr.shape[0]
-    a, b = _interval(opts, (-1.0, 1.0))
-    expected_nodes, expected_weights = gauss_legendre_nodes_and_weights(n, a, b)
-    nodes = _nodes(opts)
-    if nodes is None:
-        return _dot(expected_weights, arr)
-    if nodes.shape[0] != n:
-        raise ValueError(
-            f"array length {n} does not match {nodes.shape[0]} Gauss-Legendre nodes"
-        )
-    if np.allclose(nodes, expected_nodes, rtol=0, atol=1e-10):
-        return _dot(expected_weights, arr)
-    if np.allclose(nodes, expected_nodes[::-1], rtol=0, atol=1e-10):
-        return _dot(expected_weights[::-1], arr)
-    raise ValueError(
-        f"gauss-legendre needs the {n}-point node set on [{a}, {b}]"
-    )
-
-
 def _moment_matching(arr, opts):
     nodes = _nodes(opts)
     a, b = _interval(opts)
@@ -123,31 +94,10 @@ def _moment_matching(arr, opts):
     return _dot(w, arr)
 
 
-def _spline(arr, opts):
-    n = arr.shape[0]
-    nodes = _nodes(opts)
-    if nodes is None:
-        nodes = np.arange(n, dtype=float)
-    elif nodes.shape[0] != n:
-        raise ValueError(
-            f"array length {n} does not match {nodes.shape[0]} nodes"
-        )
-    interval = _interval(opts)
-    if interval is None:
-        a, b = float(nodes.min()), float(nodes.max())
-    else:
-        a, b = interval
-    w = spline_quadrature_weights(nodes, a, b, bc_type=opts.get("bc_type", "not-a-knot"))
-    return _dot(w, arr)
-
-
 _HANDLERS = {
     "truncated-cc-grid": _truncated_cc,
     "clenshaw-curtis": _clenshaw_curtis,
-    "newton-cotes": _newton_cotes,
-    "gauss-legendre": _gauss_legendre,
     "moment-matching": _moment_matching,
-    "cubic-spline": _spline,
 }
 
 
@@ -175,21 +125,16 @@ def int_arr(arr, schemes_and_options=None):
     ``{scheme_name: options_dict}``, e.g.::
 
         {
-            0: {"newton-cotes": {"order": 4}},
-            1: {"newton-cotes": {"order": 4}},
-            2: {"clenshaw-curtis": {"interval": [-1, 1]}},
+            0: {"clenshaw-curtis": {"interval": [-1, 1]}},
         }
 
     Omitted axes use trapezoidal. This is the same dict stored on
     ``SRDataset.schemes_and_options``. Options per scheme:
 
     - trapezoidal: none
-    - newton-cotes: ``order`` (default: 4)
-    - gauss-legendre: ``interval`` (default: [-1, 1]), ``nodes`` (default: Gauss-Legendre nodes falling within interval)
     - truncated-cc-grid: ``interval`` (default: [-1, 1]), ``nodes`` (default: truncated Chebyshev nodes on ``interval``), ``num_intervals`` (default: n-1), ``weight_func`` (default: None), ``m`` (default: None), ``degree`` (default: n-1)
     - clenshaw-curtis: ``interval`` (default: [-1, 1]), ``num_intervals`` (default: n-1), ``m`` (default: 0.0)
     - moment-matching: ``nodes`` (required), ``interval`` (required), ``weight_func`` (default: None), ``m`` (default: None), ``degree`` (default: n-1)
-    - cubic-spline: ``nodes`` (default ``np.arange(n)``), ``interval`` (default [min(nodes), max(nodes)]), ``bc_type`` (default ``not-a-knot``)
     """
     arr = np.asarray(arr, dtype=float)
     if schemes_and_options is None:

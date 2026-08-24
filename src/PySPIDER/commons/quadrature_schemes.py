@@ -5,126 +5,13 @@ from typing import Callable, Optional
 import numpy as np
 from numpy.polynomial.chebyshev import chebint, chebpts2, chebval, chebvander
 from scipy.fft import dct
-from scipy.integrate import newton_cotes, quad
-from scipy.interpolate import CubicSpline
+from scipy.integrate import quad
 
 
 #helper function used quite a bit
 def _validate_interval(a: float, b: float) -> None:
     if a > b:
         raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
-
-
-# ---------------------------------------------------------------------------
-# Composite Newton-Cotes (including Simpson and Boole)
-# ---------------------------------------------------------------------------
-
-
-def newton_cotes_panel_order(num_points: int, max_order: int = 4) -> int:
-    """
-    Return the largest closed Newton-Cotes panel order that evenly tiles the grid.
-
-    A composite closed Newton-Cotes rule of panel order ``k`` needs ``k+1``
-    points per panel and can only tile a grid of ``num_points`` points
-    (``num_points - 1`` intervals) when ``k`` divides ``num_points - 1``
-    evenly. This returns the largest ``k <= max_order`` (and ``k <=
-    num_points - 1``) satisfying that constraint, falling back to ``k = 1``
-    (the trapezoidal rule) when nothing larger divides evenly.
-
-    Parameters
-    ----------
-    num_points : int
-        Number of sample points; must be >= 2.
-    max_order : int, optional
-        Largest panel order to consider.
-
-    Returns
-    -------
-    int
-        The selected panel order, in ``[1, max_order]``.
-    """
-    if num_points < 2:
-        raise ValueError("num_points must be >= 2")
-    if max_order < 1:
-        raise ValueError("max_order must be >= 1")
-    n_intervals = num_points - 1
-    upper = min(max_order, n_intervals)
-    for order in range(upper, 0, -1):
-        if n_intervals % order == 0:
-            return order
-    return 1  # unreachable: order=1 always divides n_intervals
-
-def newton_cotes_weights(num_points: int, order: int = 4) -> np.ndarray:
-    """
-    Composite closed Newton-Cotes quadrature weights on a unit-spacing domain.
-
-    Returns weights ``w`` to be used in Newton-Cotes quadrature scheme. The grid is tiled with panels of
-    ``order`` intervals each (``order = 4`` is Boole's rule, ``order = 2`` is
-    Simpson's rule, ``order = 1`` is the trapezoidal rule); if ``order``
-    does not evenly divide ``num_points - 1``, the largest order that does
-    (see `newton_cotes_panel_order`) is used instead, so the rule always
-    succeeds regardless of axis length.
-
-    Parameters
-    ----------
-    num_points : int
-        Number of sample points; must be >= 2.
-    order : int, optional
-        Requested panel order (points per panel minus one).
-
-    Returns
-    -------
-    np.ndarray
-        Array of ``num_points`` quadrature weights.
-    """
-    actual_order = newton_cotes_panel_order(num_points, max_order=order)
-    an, _ = newton_cotes(actual_order, equal=1)
-    weights = np.zeros(num_points, dtype=float)
-    n_intervals = num_points - 1
-    n_panels = n_intervals // actual_order
-    for k in range(n_panels):
-        start = k * actual_order
-        weights[start : start + actual_order + 1] += an
-    return weights
-
-
-# ---------------------------------------------------------------------------
-# Gauss-Legendre
-# ---------------------------------------------------------------------------
-
-
-def gauss_legendre_nodes_and_weights(N: int, a: float, b: float) -> tuple[np.ndarray, np.ndarray]:
-    """
-    N-point Gauss-Legendre nodes and weights for the closed interval ``[a, b]``.
-
-    Returns nodes and weights such that ``sum_i w_i * f(x_i)`` approximates
-    ``integral_a^b f(x) dx`` exactly for polynomials of degree up to
-    ``2N - 1``. The nodes lie in the open interval ``(a, b)`` (they never
-    include the endpoints). Computed via `numpy.polynomial.legendre.leggauss`
-    on ``[-1, 1]`` and affinely mapped onto ``[a, b]``.
-
-    Parameters
-    ----------
-    N : int
-        Number of nodes; must be >= 1.
-    a : float
-        Left endpoint of the interval.
-    b : float
-        Right endpoint of the interval.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        ``(nodes, weights)`` arrays of length ``N``, ascending in ``x``.
-    """
-    if N < 1:
-        raise ValueError("N must be >= 1")
-    _validate_interval(a, b)
-    x, w = np.polynomial.legendre.leggauss(N)
-    scale = 0.5 * (b - a)
-    nodes = 0.5 * (a + b) + scale * x
-    weights = scale * w
-    return nodes, weights
 
 
 # ---------------------------------------------------------------------------
@@ -339,8 +226,6 @@ def clenshaw_curtis_weights(
         mu = _unweighted_moments(-1.0, 1.0, N)
     else:
         mu = jacobi_weighted_moments_T_dct(m, N)
-    # Coefficient map C[k, j]: a_k = sum_j C[k, j] f_j (DCT-I normalization
-    # used by chebyshev_coefficients_from_values); weights are C^T mu.
     j = np.arange(N + 1)
     C = np.cos(np.pi * np.outer(j, j) / N) / N
     C[:, 1:-1] *= 2.0
@@ -505,74 +390,3 @@ def moment_matched_quad_weights(
     V = chebvander(nodes, degree)
     mu = compute_moments(a, b, degree, weight_func=weight_func, m=m)
     return np.linalg.lstsq(V.T, mu, rcond=None)[0]
-
-
-# ---------------------------------------------------------------------------
-# Cubic-spline
-# ---------------------------------------------------------------------------
-
-
-def spline_quadrature_weights(
-    nodes: np.ndarray, a: float, b: float, bc_type: str = "not-a-knot"
-) -> np.ndarray:
-    """
-    Cubic-spline quadrature weights for arbitrary (possibly non-uniform) nodes.
-
-    Fits a cubic spline through ``(nodes_i, f_i)`` for arbitrary sample
-    coordinates ``nodes`` (uniform or not) and returns the weight vector
-    ``w`` such that ``sum_i w_i * f_i`` equals the exact integral of that
-    spline over ``[a, b]``. The weight vector is obtained in a single
-    vectorized `scipy.interpolate.CubicSpline` fit against an identity
-    right-hand side (one unit impulse per node) rather than refitting for
-    every data column, then calling `.integrate`.
-
-    Parameters
-    ----------
-    nodes : np.ndarray
-        Sample coordinates; may be ascending, descending, or unordered, but
-        must be distinct.
-    a : float
-        Left endpoint of integration.
-    b : float
-        Right endpoint of integration.
-    bc_type : str, optional
-        Boundary condition passed to `scipy.interpolate.CubicSpline`
-        (default ``'not-a-knot'``; SciPy degrades this gracefully to lower
-        order for short axes, e.g. 2-3 nodes). ``'periodic'`` is rejected: it
-        requires the first and last sampled values to match, which is
-        incompatible with computing a reusable weight vector from an
-        identity right-hand side.
-
-    Returns
-    -------
-    np.ndarray
-        Quadrature weights aligned with the original (unsorted) `nodes` order.
-    """
-    _validate_interval(a, b)
-    nodes = np.asarray(nodes, dtype=float)
-    N = nodes.shape[0]
-    if N < 2:
-        raise ValueError("spline_quadrature_weights requires at least 2 nodes")
-    if bc_type == "periodic":
-        raise ValueError(
-            "bc_type='periodic' is not supported by spline_quadrature_weights: it "
-            "requires matching endpoint samples, which cannot hold for the "
-            "identity-matrix basis used to build a reusable weight vector."
-        )
-
-    order = np.argsort(nodes)
-    x_sorted = nodes[order]
-    if np.any(np.diff(x_sorted) <= 0):
-        raise ValueError("spline_quadrature_weights requires distinct node coordinates")
-
-    try:
-        cs = CubicSpline(x_sorted, np.eye(N), axis=0, bc_type=bc_type)
-    except ValueError as exc:
-        raise ValueError(
-            f"Could not build a cubic spline with bc_type={bc_type!r} for {N} node(s)."
-        ) from exc
-
-    v = cs.integrate(a, b)
-    w = np.empty(N, dtype=float)
-    w[order] = v
-    return w

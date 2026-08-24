@@ -397,13 +397,10 @@ class AbstractDataset(object): # template for structure of all data associated w
     # Quadrature for eval_on_domain() / int_arr(). Axis (int) -> {scheme: options}.
     # Omitted axes use trapezoidal. See int_arr for options.
     #   "trapezoidal"       composite trapezoidal rule
-    #   "newton-cotes"      composite closed Newton-Cotes
-    #   "gauss-legendre"    data at Gauss-Legendre nodes
-    #   "truncated-cc-grid" Chebyshev subgrid
-    #   "clenshaw-curtis"   full Lobatto grid
+    #   "truncated-cc-grid" Chebyshev subgrid (moment-matching on a Lobatto subset)
+    #   "clenshaw-curtis"   full mapped Lobatto grid
     #   "moment-matching"   arbitrary nodes
-    #   "cubic-spline"      cubic spline integral
-    # e.g. {0: {"newton-cotes": {"order": 4}}, 2: {"clenshaw-curtis": {"interval": [-1, 1]}}}
+    # e.g. {2: {"clenshaw-curtis": {"interval": [-1, 1]}}}
     schemes_and_options: dict = field(default_factory=dict)
 
     def __post_init__(self):
