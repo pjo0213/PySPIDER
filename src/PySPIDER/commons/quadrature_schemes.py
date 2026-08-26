@@ -13,12 +13,6 @@ def _validate_interval(a: float, b: float) -> None:
     if a > b:
         raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
 
-
-# ---------------------------------------------------------------------------
-# Chebyshev / Clenshaw-Curtis and generalized moment-matching quadrature
-# ---------------------------------------------------------------------------
-
-
 def mapped_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
     """
     Affinely map the Chebyshev-Lobatto nodes from [-1, 1] onto [a, b].
