@@ -394,7 +394,7 @@ class AbstractDataset(object): # template for structure of all data associated w
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
 
-    # Quadrature for eval_on_domain() / int_arr(). Axis (int) -> {scheme: options}.
+    # Quadrature schemes and corresponding options.
     # Omitted axes use trapezoidal. See int_arr for options.
     #   "trapezoidal"       composite trapezoidal rule
     #   "truncated-cc-grid" Chebyshev subgrid (moment-matching on a Lobatto subset)
