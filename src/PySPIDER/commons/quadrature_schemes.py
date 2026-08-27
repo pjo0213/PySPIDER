@@ -342,11 +342,8 @@ def moment_matched_quad_weights(
 
     Solves the (least-squares) moment-matching system V^T w = mu, where V is
     the Chebyshev basis matrix at nodes (`numpy.polynomial.chebyshev.chebvander`)
-    and mu are the weighted moments on [a, b]. This is the generalization used
-    both by PySPIDER's Chebyshev schemes (with `nodes` restricted to a
-    Chebyshev-Lobatto [sub]grid) and by the fully general "moment-matching"
-    scheme (with arbitrary/scattered `nodes`).
-
+    and mu are the weighted moments on [a, b].
+    
     Parameters
     ----------
     nodes : np.ndarray
