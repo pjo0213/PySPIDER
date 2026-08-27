@@ -195,11 +195,7 @@ def clenshaw_curtis_weights(
 
     Returns weights w_j such that sum_j w_j f(x_j) = integral_{-1}^{1}
     (1-x^2)^m f(x) dx for f sampled at the Lobatto nodes x_j = cos(pi*j/N),
-    j = 0..N (descending order). The weights are the DCT-I coefficient map
-    contracted with the weighted moments, so a single dot product reproduces
-    the weighted integral exactly. Because the Jacobi weight is even, the
-    weight vector is symmetric and applies unchanged to samples stored in
-    ascending node order.
+    j = 0..N.
 
     Parameters
     ----------
@@ -225,7 +221,7 @@ def clenshaw_curtis_weights(
     C[:, 1:-1] *= 2.0
     C[0, :] *= 0.5
     C[-1, :] *= 0.5
-    w = C.T @ mu
+    w = C @ mu
     return w
 
 def clenshaw_curtis_weights_on_interval(
