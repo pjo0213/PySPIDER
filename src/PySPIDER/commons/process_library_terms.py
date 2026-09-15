@@ -408,11 +408,9 @@ class AbstractDataset(object): # template for structure of all data associated w
     # selects the rule per axis
     #   "trapezoidal"       composite trapezoidal rule
     #   "truncated-cc-grid" Chebyshev subgrid (moment-matching on a Lobatto subset)
-    #   "truncated-cg-grid" Chebyshev subgrid (moment-matching on a Gauss/DEDALUS subset)
-    #   "clenshaw-curtis"   full mapped Chebyshev-Lobatto grid (DCT-I)
-    #   "chebyshev-gauss"   full mapped Chebyshev-Gauss / DEDALUS grid (DCT-III)
+    #   "clenshaw-curtis"   full mapped Lobatto grid
     #   "moment-matching"   arbitrary nodes
-    # e.g. {2: "clenshaw-curtis"} or {2: "chebyshev-gauss"}
+    # e.g. {2: "clenshaw-curtis"}
     schemes_and_options: dict = field(default_factory=dict)
 
     def __post_init__(self):
