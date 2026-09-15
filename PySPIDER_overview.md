@@ -69,3 +69,6 @@
 ### discrete/coarse_grain_utils.py
 - gaussian_coarse_grain2d / kd_gaussian_coarse_grain2d: Coarse-grained estimates using Gaussian kernels; KDTree variant restricts to nearby points for speed.
 - periodic_* variants: Periodic boundary handling via image replication with the same kernels.
+
+### commons/integration_schemes.py 
+- int_arr(...): Integrates an array of values on an integration domain using quadrature pipeline, initiated in quadrature_schemes.py. Arguments allow one to configure particular quadrature scheme. See documentation.
