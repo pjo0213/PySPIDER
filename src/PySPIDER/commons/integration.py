@@ -261,12 +261,16 @@ def int_arr(arr, schemes_and_options=None, weight=None):
       affine image of the full Lobatto grid. A ``Weight`` stays on
       [-1, 1]; ``interval`` only supplies the Jacobian (b-a)/2. Grid
       size is n-1. For W(x)f(x) on a proper subinterval use
-      truncated-cc-grid.
+      truncated-cc-grid. Optional ``nodes`` must be that full mapped
+      Lobatto grid (ascending or descending).
     - chebyshev-gauss: optional ``interval`` (default [-1, 1]), the
       affine image of the full Chebyshev-Gauss / DEDALUS roots grid.
-      Weights come from a DCT-III of Chebyshev moments (Fejér's first
-      rule). Same Weight / Jacobian convention as clenshaw-curtis. For a
-      subdomain of a parent Gauss grid use truncated-cg-grid.
+      A ``Weight`` stays on [-1, 1]; ``interval`` only supplies the
+      Jacobian (b-a)/2. Grid size is n (array length). Weights come
+      from a DCT-III of Chebyshev moments (Fejér's first rule). For
+      W(x)f(x) on a proper subinterval use truncated-cg-grid. Optional
+      ``nodes`` must be that full mapped Gauss grid (ascending, or
+      descending Dedalus order).
     - truncated-cc-grid: ``interval`` (default [-1, 1]) and either
       ``nodes`` or ``num_intervals`` of the parent Lobatto grid
     - truncated-cg-grid: ``interval`` (default [-1, 1]) and either

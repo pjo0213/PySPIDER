@@ -41,19 +41,21 @@ def mapped_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
 
 def mapped_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
-    Affinely map Chebyshev-Gauss (first-kind / DEDALUS) nodes onto [a, b].
+    Affinely map the Chebyshev-Gauss nodes from [-1, 1] onto [a, b].
 
-    These are the roots of T_n, i.e. the interior grid used by Dedalus
-    Chebyshev bases. Uses `numpy.polynomial.chebyshev.chebpts1`, then maps
-    [-1, 1] onto [a, b] and returns the nodes sorted ascending. Unlike
-    Lobatto, the endpoints ±1 are not included.
+    These are the roots of T_n (first-kind / DEDALUS interior grid). Uses
+    `numpy.polynomial.chebyshev.chebpts1` for the reference nodes, then
+    applies x -> (a+b)/2 + (b-a)/2 * x and returns them sorted ascending.
+    Unlike Lobatto, the endpoints ±1 are not included.
 
     Parameters
     ----------
     n : int
         Number of nodes (spectral modes); produces n nodes.
-    a, b : float
-        Target interval endpoints.
+    a : float
+        Left endpoint of the target interval.
+    b : float
+        Right endpoint of the target interval.
 
     Returns
     -------
@@ -101,17 +103,21 @@ def truncated_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
 
 def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
-    Return the Chebyshev-Gauss nodes of an n-point reference grid in [a, b].
+    Return the Chebyshev-Gauss nodes that fall within [a, b].
 
-    The parent grid is the first-kind / DEDALUS roots grid on [-1, 1]
-    (`chebpts1(n)`). Only nodes lying in [a, b] are retained.
+    The full reference grid is generated with
+    `numpy.polynomial.chebyshev.chebpts1` (the first-kind / DEDALUS roots
+    grid on [-1, 1]) and only the subset lying in [a, b] (within a
+    floating-point tolerance) is retained, sorted ascending.
 
     Parameters
     ----------
     n : int
         Number of nodes of the underlying reference grid.
-    a, b : float
-        Retained interval endpoints.
+    a : float
+        Left endpoint of the retained interval.
+    b : float
+        Right endpoint of the retained interval.
 
     Returns
     -------
@@ -229,7 +235,7 @@ def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> O
 
 def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
-    Return n when nodes are a full Chebyshev-Gauss grid mapped onto [a, b].
+    Return n when nodes are a full Gauss grid affinely mapped onto [a, b].
 
     Accepts ascending or descending node orderings. n is the number of nodes
     (DEDALUS Chebyshev size), not the number of Lobatto intervals.
@@ -321,7 +327,7 @@ def chebyshev_gauss_weights(
     axis: int = 0,
 ) -> np.ndarray:
     """
-    Fejér-I weights on the full Chebyshev-Gauss grid mapped to [a, b].
+    Fejér-I weights on the full Gauss grid mapped to [a, b].
 
     Returns weights w_j such that sum_j w_j f(x_j) approximates
 
@@ -329,13 +335,13 @@ def chebyshev_gauss_weights(
 
     where s maps [a, b] onto [-1, 1] and the nodes are the roots of T_n
     (DEDALUS Chebyshev grid). ``w`` is 1 or one axis of a PySPIDER
-    ``Weight``. Uses reference DCT-III weights times the affine Jacobian
-    (b-a)/2. Weights are in ascending node order.
+    ``Weight``. Uses reference DCT-III (Fejér-I) weights times the affine
+    Jacobian (b-a)/2. Weights are in ascending order.
 
     Parameters
     ----------
     num_nodes : int
-        Number of Gauss nodes n (same as the Dedalus Chebyshev size).
+        Number of Gauss nodes n; the grid has n nodes (Dedalus Chebyshev size).
     a, b : float, optional
         Interval endpoints; default [-1, 1].
     weight : optional
