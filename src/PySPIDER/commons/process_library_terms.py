@@ -332,6 +332,26 @@ class LibraryData(object):  # structures information associated with a given ran
     def clear_results(self): # create a copy of self without results computed
         return replace(self, Q=None, col_weights=None, row_weights=None)
 
+def _terms_matching_irrep(terms, irrep):
+    """Select library terms belonging to ``irrep`` (rank and symmetry filters)."""
+    match irrep:
+        case int():
+            return [term for term in terms if term.rank == irrep]
+        case FullRank():
+            return [term for term in terms if term.rank == irrep.rank]
+        case Antisymmetric():
+            return [
+                term for term in terms
+                if term.rank == irrep.rank and term.symmetry() != 1
+            ]
+        case SymmetricTraceFree():
+            return [
+                term for term in terms
+                if term.rank == irrep.rank and term.symmetry() != -1
+            ]
+        case _:
+            raise NotImplementedError(f"Unsupported irrep {irrep!r}")
+
 #function for initializing global variables for each parallel worker process
 def init_domain_worker(dataset_init, current_irrep_init, by_parts_init, debug_init):
     global worker_dataset, worker_current_irrep, worker_by_parts, worker_debug
@@ -343,9 +363,6 @@ def init_domain_worker(dataset_init, current_irrep_init, by_parts_init, debug_in
 #function to be executed in parallel to evaluate all terms for a given domain
 def parallel_domain_task(domain):
     dataset = worker_dataset
-    irrep = worker_current_irrep
-    by_parts = worker_by_parts
-    debug = worker_debug
 
     domain_results_dict = defaultdict(float)
 
@@ -355,14 +372,10 @@ def parallel_domain_task(domain):
         value = dataset.eval_on_domain(t, w, domain)
         key = term, tensor_weight
         domain_results_dict[key] += value
-    
-    # Free up memory by removing cached field_dict entries for this domain
-    if dataset.cleanup_cache and dataset.field_dict is not None:
-        keys_to_remove = [key for key in dataset.field_dict.keys() if len(key) == 2 and key[1] == domain]
-        for key in keys_to_remove:
-            del dataset.field_dict[key]
-    
-    return domain, domain_results_dict
+
+    extra = dataset.domain_task_extra(domain)
+    dataset.cleanup_domain_cache(domain)
+    return domain, domain_results_dict, extra
 
 @dataclass(kw_only=True)
 class AbstractDataset(object): # template for structure of all data associated with a given sparse regression dataset
@@ -408,9 +421,11 @@ class AbstractDataset(object): # template for structure of all data associated w
     # selects the rule per axis
     #   "trapezoidal"       composite trapezoidal rule
     #   "truncated-cc-grid" Chebyshev subgrid (moment-matching on a Lobatto subset)
-    #   "clenshaw-curtis"   full mapped Lobatto grid
+    #   "truncated-cg-grid" Chebyshev subgrid (moment-matching on a Gauss/DEDALUS subset)
+    #   "clenshaw-curtis"   full mapped Chebyshev-Lobatto grid (DCT-I)
+    #   "chebyshev-gauss"   full mapped Chebyshev-Gauss / DEDALUS grid (DCT-III)
     #   "moment-matching"   arbitrary nodes
-    # e.g. {2: "clenshaw-curtis"}
+    # e.g. {2: "clenshaw-curtis"} or {2: "chebyshev-gauss"}
     schemes_and_options: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -516,10 +531,17 @@ class AbstractDataset(object): # template for structure of all data associated w
 
     @classmethod
     def only_rank2_irreps(cls):
-        return (Antisymmetric(rank=2), SymmetricTraceFree(rank=2)) 
-    
-    def make_libraries(self, **kwargs): # populate libs
-        pass
+        return (Antisymmetric(rank=2), SymmetricTraceFree(rank=2))
+
+    def generate_library_terms(self, **kwargs):
+        """Return library terms for ``make_libraries``; implemented by subclasses."""
+        raise NotImplementedError
+
+    def make_libraries(self, **kwargs):
+        self.libs = dict()
+        terms = self.generate_library_terms(**kwargs)
+        for irrep in self.irreps:
+            self.libs[irrep] = LibraryData(_terms_matching_irrep(terms, irrep), irrep)
 
     def make_domains(self, ndomains, domain_size, pad=0): # set domain_size/populate domains
         pass
@@ -642,6 +664,83 @@ class AbstractDataset(object): # template for structure of all data associated w
     #     else:
     #         return np.einsum('ij..., jk, ik->...', product_values, self.metric, tensor_weight, optimize=True)
 
+    def cleanup_domain_cache(self, domain):
+        """Drop cached ``field_dict`` entries for ``domain`` after it is processed."""
+        if not self.cleanup_cache or self.field_dict is None:
+            return
+        keys_to_remove = [
+            key for key in self.field_dict.keys()
+            if len(key) == 2 and key[1] == domain
+        ]
+        for key in keys_to_remove:
+            del self.field_dict[key]
+
+    def domain_task_extra(self, domain):
+        """Optional per-domain payload from a parallel worker (e.g. discrete ρ std)."""
+        return None
+
+    def consume_domain_task_extras(self, extras):
+        """Store payloads collected from ``domain_task_extra`` after parallel eval."""
+        return None
+
+    def _record_field_scales(self, names=None, *, check_nan=False):
+        """Fill ``scale_dict`` mean/std entries from ``data_dict`` fields."""
+        self.scale_dict = dict()
+        for name in self.data_dict:
+            if names is None or name in names:
+                arr = self.data_dict[name]
+                mean = np.mean(np.linalg.norm(arr) / np.sqrt(arr.size))
+                if check_nan and np.isnan(mean):
+                    raise ValueError(
+                        f'NaNs present in field {name} - please replace with numeric data and try again'
+                    )
+                self.scale_dict[name] = {'mean': mean, 'std': np.std(arr)}
+
+    def _collect_integrated_terms_tuples(self, irrep, by_parts=True, debug=False):
+        """Precompute (integrated term, weight, original term, tensor weight) tuples."""
+        self.integrated_terms_tuples = []
+        for term in list(self.libs[irrep].terms):
+            if debug:
+                print("UNINDEXED TERM:")
+                print(term)
+                term_symmetry = term.symmetry()
+                print("Symmetry:", term_symmetry)
+            for weight in list(self.weights):
+                for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
+                    if debug:
+                        print("Tensor weight:", tensor_weight)
+                    for indexed_term, scalar_weight in self.get_index_assignments(term, tensor_weight):
+                        if debug:
+                            print("ASSIGNMENTS:", term, "->")
+                            print("Indexed term:", indexed_term)
+                            print("Scalar weight:", scalar_weight)
+                        for t, w in int_by_parts(indexed_term, scalar_weight, by_parts):
+                            if debug:
+                                print("INT BY PARTS:", indexed_term, "->")
+                                print("Integrated term:", t)
+                                print("Integrated weight:", w)
+                            self.integrated_terms_tuples.append((t, w, term, tensor_weight))
+
+    def _assemble_Q_matrix(self, irrep, all_results):
+        """Assemble Q from per-domain dicts keyed by (term, tensor_weight)."""
+        terms = list(self.libs[irrep].terms)
+        weights = list(self.weights)
+        term_to_col_idx = {term: i for i, term in enumerate(terms)}
+        row_map = {}
+        current_row_idx = 0
+        for weight in weights:
+            for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
+                for domain in self.domains:
+                    row_key = (tensor_weight, domain)
+                    if row_key not in row_map:
+                        row_map[row_key] = current_row_idx
+                        current_row_idx += 1
+        Q_matrix = np.zeros((current_row_idx, len(terms)), dtype=np.float64)
+        for domain, domain_results in all_results:
+            for (term, tensor_weight), result in domain_results.items():
+                Q_matrix[row_map[(tensor_weight, domain)], term_to_col_idx[term]] = result
+        return Q_matrix
+
     def make_Q(self, irrep, by_parts=True, debug=False): # compute Q matrix for given irrep
         #debug = True
         #by_parts = False
@@ -693,64 +792,22 @@ class AbstractDataset(object): # template for structure of all data associated w
     
     def make_Q_parallel(self, irrep, by_parts=True, debug=False, num_processors=None):
         init_args = (self, irrep, by_parts, debug)
-        domains = self.domains
         all_results = []
+        extras = []
 
-        #precompute symbolic manipulations for parallel tasks
-        self.integrated_terms_tuples = []
-        for term in list(self.libs[irrep].terms):
-            if debug:
-                print("UNINDEXED TERM:")
-                print(term)
-                term_symmetry = term.symmetry()
-                print("Symmetry:", term_symmetry)
-            for weight in list(self.weights):
-                for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
-                    if debug:
-                        print("Tensor weight:", tensor_weight)
-                    for indexed_term, scalar_weight in self.get_index_assignments(term,tensor_weight): #, debug
-                        if debug:
-                            print("ASSIGNMENTS:", term, "->")
-                            print("Indexed term:", indexed_term)
-                            print("Scalar weight:", scalar_weight)
-                        for t, w in int_by_parts(indexed_term, scalar_weight, by_parts):
-                            if debug:
-                                print("INT BY PARTS:", indexed_term, "->")
-                                print("Integrated term:", t)
-                                print("Integrated weight:", w)
-                            self.integrated_terms_tuples.append((t,w,term,tensor_weight))
+        self._collect_integrated_terms_tuples(irrep, by_parts=by_parts, debug=debug)
 
-        #begin parallel task execution
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_processors, initializer=init_domain_worker, initargs=init_args) as executor:
-            results = executor.map(parallel_domain_task, domains)
-            for result in results:
-                all_results.append(result)
-                  
-        terms = list(self.libs[irrep].terms)
-        weights = list(self.weights)
-        num_cols = len(terms)
-        term_to_col_idx = {term: i for i, term in enumerate(terms)}
-        row_map = {}
-        current_row_idx = 0
-        for weight in weights:
-            for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
-                for domain in domains:
-                    row_key = (tensor_weight, domain)
-                    if row_key not in row_map:
-                        row_map[row_key] = current_row_idx
-                        current_row_idx += 1
-        num_rows = current_row_idx
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_processors,
+            initializer=init_domain_worker,
+            initargs=init_args,
+        ) as executor:
+            for domain, domain_results, extra in executor.map(parallel_domain_task, self.domains):
+                all_results.append((domain, domain_results))
+                extras.append(extra)
 
-        Q_matrix = np.zeros((num_rows, num_cols), dtype=np.float64)
-
-        for domain, domain_results in all_results:
-            for (term, tensor_weight), result in domain_results.items():
-                col_idx = term_to_col_idx[term]
-                row_idx = row_map[(tensor_weight, domain)]
-
-                Q_matrix[row_idx, col_idx] = result
-
-        return Q_matrix
+        self.consume_domain_task_extras(extras)
+        return self._assemble_Q_matrix(irrep, all_results)
 
         
     def make_library_matrices(self, by_parts=True, debug=False, parallel=True, num_processors=None): # compute LibraryData Q matrices

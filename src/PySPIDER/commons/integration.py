@@ -3,18 +3,24 @@
 import numpy as np
 
 from .quadrature_schemes import (
+    chebyshev_gauss_weights,
     clenshaw_curtis_weights,
+    mapped_chebyshev_gauss_nodes,
     mapped_chebyshev_nodes,
     moment_matched_quad_weights,
+    truncated_chebyshev_gauss_nodes,
     truncated_chebyshev_nodes,
     _ensure_weight_ready,
+    _mapped_gauss_reference_degree,
     _mapped_lobatto_reference_degree,
 )
 
 SUPPORTED_SCHEMES = (
     "trapezoidal",
     "truncated-cc-grid",
+    "truncated-cg-grid",
     "clenshaw-curtis",
+    "chebyshev-gauss",
     "moment-matching",
 )
 
@@ -60,49 +66,96 @@ def _trapezoidal(arr, opts, weight=None, axis=0):
     return _axis_scale(weight, axis) * np.trapezoid(arr, axis=0)
 
 
-def _truncated_cc(arr, opts, weight=None, axis=0):
+def _truncated_chebyshev(arr, opts, weight=None, axis=0, *, kind):
     n = arr.shape[0]
     nodes = _nodes(opts)
     a, b = _interval(opts, (-1.0, 1.0))
     if nodes is None:
-        n_intervals = opts.get("num_intervals")
-        if n_intervals is None:
-            if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
-                raise ValueError(
-                    f"truncated-cc-grid on [{a}, {b}] needs 'nodes' or 'num_intervals'"
-                )
-            n_intervals = n - 1
-        nodes = truncated_chebyshev_nodes(int(n_intervals), a, b)
+        if kind == "lobatto":
+            n_intervals = opts.get("num_intervals")
+            if n_intervals is None:
+                if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
+                    raise ValueError(
+                        f"truncated-cc-grid on [{a}, {b}] needs 'nodes' or 'num_intervals'"
+                    )
+                n_intervals = n - 1
+            nodes = truncated_chebyshev_nodes(int(n_intervals), a, b)
+            grid_name = "Chebyshev-Lobatto"
+        else:
+            n_parent = opts.get("num_nodes")
+            if n_parent is None:
+                if not (np.isclose(a, -1.0) and np.isclose(b, 1.0)):
+                    raise ValueError(
+                        f"truncated-cg-grid on [{a}, {b}] needs 'nodes' or 'num_nodes'"
+                    )
+                n_parent = n
+            nodes = truncated_chebyshev_gauss_nodes(int(n_parent), a, b)
+            grid_name = "Chebyshev-Gauss"
+    else:
+        grid_name = "Chebyshev-Lobatto" if kind == "lobatto" else "Chebyshev-Gauss"
     if nodes.shape[0] != n:
         raise ValueError(
-            f"array length {n} does not match {nodes.shape[0]} Chebyshev nodes"
+            f"array length {n} does not match {nodes.shape[0]} {grid_name} nodes"
         )
     qw = moment_matched_quad_weights(nodes, a, b, weight=weight, axis=axis)
     return _dot(_axis_scale(weight, axis) * qw, arr)
 
 
-def _clenshaw_curtis(arr, opts, weight=None, axis=0):
+def _truncated_cc(arr, opts, weight=None, axis=0):
+    return _truncated_chebyshev(arr, opts, weight=weight, axis=axis, kind="lobatto")
+
+
+def _truncated_cg(arr, opts, weight=None, axis=0):
+    return _truncated_chebyshev(arr, opts, weight=weight, axis=axis, kind="gauss")
+
+
+def _full_chebyshev(arr, opts, weight=None, axis=0, *, kind):
     n = arr.shape[0]
     a, b = _interval(opts, (-1.0, 1.0))
     nodes = _nodes(opts)
-    if nodes is None:
-        nodes = mapped_chebyshev_nodes(n - 1, a, b)
-    elif _mapped_lobatto_reference_degree(nodes, a, b) is None:
-        raise ValueError(
-            f"clenshaw-curtis needs the full mapped Lobatto grid on [{a}, {b}]"
+    if kind == "lobatto":
+        if nodes is None:
+            nodes = mapped_chebyshev_nodes(n - 1, a, b)
+        elif _mapped_lobatto_reference_degree(nodes, a, b) is None:
+            raise ValueError(
+                f"clenshaw-curtis needs the full mapped Lobatto grid on [{a}, {b}]"
+            )
+        if nodes.shape[0] != n:
+            raise ValueError(
+                f"array length {n} does not match {nodes.shape[0]} Lobatto nodes"
+            )
+        expected_asc = mapped_chebyshev_nodes(nodes.shape[0] - 1, a, b)
+        qw = clenshaw_curtis_weights(
+            nodes.shape[0] - 1, a, b, weight=weight, axis=axis
         )
-    if nodes.shape[0] != n:
-        raise ValueError(
-            f"array length {n} does not match {nodes.shape[0]} Lobatto nodes"
+    else:
+        if nodes is None:
+            nodes = mapped_chebyshev_gauss_nodes(n, a, b)
+        elif _mapped_gauss_reference_degree(nodes, a, b) is None:
+            raise ValueError(
+                f"chebyshev-gauss needs the full mapped Gauss grid on [{a}, {b}]"
+            )
+        if nodes.shape[0] != n:
+            raise ValueError(
+                f"array length {n} does not match {nodes.shape[0]} Gauss nodes"
+            )
+        expected_asc = mapped_chebyshev_gauss_nodes(nodes.shape[0], a, b)
+        qw = chebyshev_gauss_weights(
+            nodes.shape[0], a, b, weight=weight, axis=axis
         )
-    N = nodes.shape[0] - 1
-    qw = clenshaw_curtis_weights(N, a, b, weight=weight, axis=axis)
-    # Weights already match mapped_chebyshev_nodes. Flip only if the
-    # caller passed descending Lobatto nodes.
-    expected_asc = mapped_chebyshev_nodes(N, a, b)
+    # Weights already match the ascending mapped nodes. Flip only if the
+    # caller passed the descending (DEDALUS-style) ordering.
     if np.allclose(nodes, expected_asc[::-1], rtol=0, atol=1e-12):
         qw = qw[::-1]
     return _dot(_axis_scale(weight, axis) * qw, arr)
+
+
+def _clenshaw_curtis(arr, opts, weight=None, axis=0):
+    return _full_chebyshev(arr, opts, weight=weight, axis=axis, kind="lobatto")
+
+
+def _chebyshev_gauss(arr, opts, weight=None, axis=0):
+    return _full_chebyshev(arr, opts, weight=weight, axis=axis, kind="gauss")
 
 
 def _moment_matching(arr, opts, weight=None, axis=0):
@@ -110,16 +163,17 @@ def _moment_matching(arr, opts, weight=None, axis=0):
     if nodes is None:
         raise ValueError(
             "moment-matching requires 'nodes' and 'interval' in scheme options; "
-            "for subdomain integration use truncated-cc-grid (infers nodes from "
-            "array length) or pass nodes sliced to the subdomain."
+            "for subdomain integration use truncated-cc-grid or truncated-cg-grid "
+            "(infers nodes from array length) or pass nodes sliced to the subdomain."
         )
     n = arr.shape[0]
     if nodes.shape[0] != n:
         raise ValueError(
             f"moment-matching: array length {n} along the active axis does not "
             f"match {nodes.shape[0]} supplied nodes. Pass nodes sliced to the "
-            f"integration subdomain, or use truncated-cc-grid / clenshaw-curtis "
-            f"(which infer the node set from the array length)."
+            f"integration subdomain, or use truncated-cc-grid / truncated-cg-grid / "
+            f"clenshaw-curtis / chebyshev-gauss (which infer the node set from the "
+            f"array length)."
         )
     a, b = _interval(opts)
     qw = moment_matched_quad_weights(nodes, a, b, weight=weight, axis=axis)
@@ -128,7 +182,9 @@ def _moment_matching(arr, opts, weight=None, axis=0):
 
 _HANDLERS = {
     "truncated-cc-grid": _truncated_cc,
+    "truncated-cg-grid": _truncated_cg,
     "clenshaw-curtis": _clenshaw_curtis,
+    "chebyshev-gauss": _chebyshev_gauss,
     "moment-matching": _moment_matching,
     "trapezoidal": _trapezoidal,
 }
@@ -183,7 +239,9 @@ def int_arr(arr, schemes_and_options=None, weight=None):
     scheme name or a one-entry dict ``{scheme_name: options_dict}``, e.g.::
 
         {0: "clenshaw-curtis"}
+        {0: "chebyshev-gauss"}
         {2: {"truncated-cc-grid": {"interval": [-0.3, 0.7]}}}
+        {2: {"truncated-cg-grid": {"interval": [-0.3, 0.7], "num_nodes": 64}}}
 
     Omitted axes use trapezoidal. This is the same dict stored on
     ``AbstractDataset.schemes_and_options``. A SPIDER ``Weight`` is passed
@@ -203,12 +261,19 @@ def int_arr(arr, schemes_and_options=None, weight=None):
 
     - trapezoidal: none (composite trapezoidal of sampled wT)
     - clenshaw-curtis: optional ``interval`` (default [-1, 1]), the
-      affine image of the full Lobatto grid. A ``Weight`` stays on
+      affine image of the full Chebyshev-Lobatto grid. A ``Weight`` stays on
       [-1, 1]; ``interval`` only supplies the Jacobian (b-a)/2. Grid
       size is n-1. For W(x)f(x) on a proper subinterval use
       truncated-cc-grid.
+    - chebyshev-gauss: optional ``interval`` (default [-1, 1]), the
+      affine image of the full Chebyshev-Gauss / DEDALUS roots grid.
+      Weights come from a DCT-III of Chebyshev moments (Fejér's first
+      rule). Same Weight / Jacobian convention as clenshaw-curtis. For a
+      subdomain of a parent Gauss grid use truncated-cg-grid.
     - truncated-cc-grid: ``interval`` (default [-1, 1]) and either
       ``nodes`` or ``num_intervals`` of the parent Lobatto grid
+    - truncated-cg-grid: ``interval`` (default [-1, 1]) and either
+      ``nodes`` or ``num_nodes`` of the parent Gauss / DEDALUS grid
     - moment-matching: ``nodes`` and ``interval`` (the arbitrary node
       set; the weight function is the ``Weight``, not a scheme option)
     """

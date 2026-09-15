@@ -3,7 +3,9 @@
 from typing import Optional
 
 import numpy as np
-from numpy.polynomial.chebyshev import chebint, chebpts2, chebval, chebvander, poly2cheb
+from numpy.polynomial.chebyshev import (
+    chebint, chebpts1, chebpts2, chebval, chebvander, poly2cheb,
+)
 from scipy.fft import dct
 
 
@@ -11,6 +13,39 @@ from scipy.fft import dct
 def _validate_interval(a: float, b: float) -> None:
     if a > b:
         raise ValueError(f"interval endpoints must satisfy a <= b, got ({a}, {b})")
+
+def _affine_map_from_reference(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Map reference nodes on [-1, 1] onto [a, b]."""
+    return 0.5 * (a + b) + 0.5 * (b - a) * np.asarray(x, dtype=float)
+
+def _keep_nodes_in_interval(
+    nodes: np.ndarray, a: float, b: float, *, grid_name: str, spec
+) -> np.ndarray:
+    """Keep reference nodes that lie in [a, b] (within a floating-point tolerance)."""
+    _validate_interval(a, b)
+    nodes = np.asarray(nodes, dtype=float)
+    tol = np.finfo(float).eps * max(abs(a), abs(b), 1.0)
+    kept = nodes[(nodes >= a - tol) & (nodes <= b + tol)]
+    if kept.size == 0:
+        raise ValueError(
+            f"No {grid_name} nodes from reference grid {spec} lie in [{a}, {b}]. "
+            "Increase the parent grid size or widen the interval."
+        )
+    return kept
+
+def _mapped_reference_degree(
+    nodes: np.ndarray, a: float, b: float, expected: np.ndarray
+) -> Optional[int]:
+    """Return len(expected) if ``nodes`` matches ``expected`` or its reverse."""
+    nodes = np.asarray(nodes, dtype=float)
+    if nodes.size != expected.size or nodes.size == 0:
+        return None
+    _validate_interval(a, b)
+    if np.allclose(nodes, expected, rtol=0, atol=1e-12):
+        return expected.size
+    if np.allclose(nodes, expected[::-1], rtol=0, atol=1e-12):
+        return expected.size
+    return None
 
 def mapped_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
     """
@@ -34,8 +69,34 @@ def mapped_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
         Array of N+1 nodes mapped onto [a, b].
     """
     _validate_interval(a, b)
-    x = chebpts2(N + 1)
-    return (0.5 * (a + b) + 0.5 * (b - a) * x)
+    return _affine_map_from_reference(chebpts2(N + 1), a, b)
+
+def mapped_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
+    """
+    Affinely map Chebyshev-Gauss (first-kind / DEDALUS) nodes onto [a, b].
+
+    These are the roots of T_n, i.e. x_j = cos(π (j + 1/2) / n), the interior
+    grid used by Dedalus Chebyshev bases. Uses
+    `numpy.polynomial.chebyshev.chebpts1`, then maps [-1, 1] onto [a, b] and
+    returns the nodes sorted ascending. Unlike Lobatto, the endpoints ±1 are
+    not included.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes (spectral modes); produces n nodes.
+    a, b : float
+        Target interval endpoints.
+
+    Returns
+    -------
+    np.ndarray
+        Array of n nodes mapped onto [a, b].
+    """
+    _validate_interval(a, b)
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    return _affine_map_from_reference(chebpts1(n), a, b)
 
 def truncated_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
     """
@@ -59,17 +120,34 @@ def truncated_chebyshev_nodes(N: int, a: float, b: float) -> np.ndarray:
     np.ndarray
         Array of the reference nodes contained in [a, b].
     """
-    _validate_interval(a, b)
-    nodes = chebpts2(N + 1)
-    tol = np.finfo(float).eps * max(abs(a), abs(b), 1.0)
-    mask = (nodes >= a - tol) & (nodes <= b + tol)
-    kept = nodes[mask]
-    if kept.size == 0:
-        raise ValueError(
-            f"No Chebyshev-Lobatto nodes from reference grid N = {N} lie in [{a}, {b}]. "
-            "Increase num_intervals or widen the interval."
-        )
-    return kept
+    return _keep_nodes_in_interval(
+        chebpts2(N + 1), a, b, grid_name="Chebyshev-Lobatto", spec=f"N = {N}"
+    )
+
+def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
+    """
+    Return the Chebyshev-Gauss nodes of an n-point reference grid in [a, b].
+
+    The parent grid is the first-kind / DEDALUS roots grid on [-1, 1]
+    (`chebpts1(n)`). Only nodes lying in [a, b] are retained.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes of the underlying reference grid.
+    a, b : float
+        Retained interval endpoints.
+
+    Returns
+    -------
+    np.ndarray
+        Array of the reference Gauss nodes contained in [a, b].
+    """
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    return _keep_nodes_in_interval(
+        chebpts1(n), a, b, grid_name="Chebyshev-Gauss", spec=f"n = {n}"
+    )
 
 def _chebyshev_coefficients_from_values(f_values: np.ndarray) -> np.ndarray:
     """
@@ -150,21 +228,30 @@ def _unweighted_moments(a: float, b: float, max_degree: int) -> np.ndarray:
 #used in integration.py
 def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
-    Return N when nodes are a full Lobatto grid affinely mapped onto [a, b].
+    Return N (intervals) when nodes are a full Lobatto grid mapped onto [a, b].
 
     Accepts ascending or descending node orderings.
     """
     nodes = np.asarray(nodes, dtype=float)
     if nodes.size < 2:
         return None
-    _validate_interval(a, b)
     N = nodes.shape[0] - 1
-    expected = mapped_chebyshev_nodes(N, a, b)
-    if np.allclose(nodes, expected, rtol=0, atol=1e-12):
-        return N
-    if np.allclose(nodes, expected[::-1], rtol=0, atol=1e-12):
-        return N
-    return None
+    matched = _mapped_reference_degree(nodes, a, b, mapped_chebyshev_nodes(N, a, b))
+    return None if matched is None else N
+
+def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
+    """
+    Return n when nodes are a full Chebyshev-Gauss grid mapped onto [a, b].
+
+    Accepts ascending or descending node orderings. n is the number of nodes
+    (DEDALUS Chebyshev size), not the number of Lobatto intervals.
+    """
+    nodes = np.asarray(nodes, dtype=float)
+    if nodes.size < 1:
+        return None
+    n = nodes.shape[0]
+    matched = _mapped_reference_degree(nodes, a, b, mapped_chebyshev_gauss_nodes(n, a, b))
+    return None if matched is None else n
 
 def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
     """Clenshaw-Curtis node weights from Chebyshev moments via DCT-I.
@@ -173,6 +260,22 @@ def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
     they are ascending.
     """
     return _chebyshev_coefficients_from_values(mu)[::-1]
+
+def _fejer_weights_from_moments(mu: np.ndarray) -> np.ndarray:
+    """Chebyshev-Gauss (Fejér-I) node weights from Chebyshev moments via DCT-III.
+
+    For n Gauss nodes x_j = cos(π (2j+1) / (2n)), interpolatory weights are
+
+        w_j = (1/n) [ μ_0 + 2 sum_{k=1}^{n-1} μ_k T_k(x_j) ],
+
+    which is scipy's unnormalized DCT-III of the moments (type=3) divided by n.
+    DCT-III emits weights for the descending Dedalus ordering (near 1 -> near
+    -1); reverse so they match ascending ``chebpts1`` / ``mapped_chebyshev_gauss_nodes``.
+    """
+    n = mu.shape[0]
+    if n < 1:
+        raise ValueError("At least one moment is required")
+    return (dct(np.asarray(mu, dtype=float), type=3) / n)[::-1]
 
 def clenshaw_curtis_weights(
     num_intervals: int,
@@ -215,6 +318,49 @@ def clenshaw_curtis_weights(
         raise ValueError("num_intervals must be >= 1")
     mu = _compute_moments(-1.0, 1.0, N, weight=weight, axis=axis)
     return 0.5 * (b - a) * _clenshaw_curtis_from_moments(mu)
+
+def chebyshev_gauss_weights(
+    num_nodes: int,
+    a: float = -1.0,
+    b: float = 1.0,
+    *,
+    weight=None,
+    axis: int = 0,
+) -> np.ndarray:
+    """
+    Fejér-I weights on the full Chebyshev-Gauss grid mapped to [a, b].
+
+    Returns weights w_j such that sum_j w_j f(x_j) approximates
+
+        integral_a^b w(s(x)) f(x) dx,
+
+    where s maps [a, b] onto [-1, 1] and the nodes are the roots of T_n
+    (DEDALUS Chebyshev grid). ``w`` is 1 or one axis of a PySPIDER
+    ``Weight``. Uses reference DCT-III weights times the affine Jacobian
+    (b-a)/2. Weights are in ascending node order.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of Gauss nodes n (same as the Dedalus Chebyshev size).
+    a, b : float, optional
+        Interval endpoints; default [-1, 1].
+    weight : optional
+        PySPIDER Weight; moments use that object's attributes for ``axis``.
+    axis : int, optional
+        Axis of ``weight`` to use.
+
+    Returns
+    -------
+    np.ndarray
+        Array of n quadrature weights in ascending node order.
+    """
+    _validate_interval(a, b)
+    n = num_nodes
+    if n < 1:
+        raise ValueError("num_nodes must be >= 1")
+    mu = _compute_moments(-1.0, 1.0, n - 1, weight=weight, axis=axis)
+    return 0.5 * (b - a) * _fejer_weights_from_moments(mu)
 
 #moment matching and relevant helper functions
 def _compute_moments(

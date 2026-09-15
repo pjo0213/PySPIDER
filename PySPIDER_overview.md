@@ -20,10 +20,10 @@
 - LibraryData: Holds the per-irrep library, library matrix G (Q), and scaling info.
 - AbstractDataset: Abstract base extended by `continuous/` and `discrete/` variants; contains the dataset and all configuration used for library construction, evaluation, and regression.
 - Key methods:
-  - make_libraries(): Use `library.py` to create libraries of terms.
+  - make_libraries(): Shared irrep partitioning; subclasses supply terms via generate_library_terms().
   - make_domains(): Randomly place rectangular spatiotemporal domains (with padding options).
   - make_weights(): Build scalar/tensor weight bases per irrep.
-  - make_Q / make_Q_parallel(): Assemble library matrices by evaluating all term–weight–domain inner products; parallel version precomputes integration by parts and assigns domains to workers.
+  - make_Q / make_Q_parallel(): Assemble library matrices by evaluating all term–weight–domain inner products; parallel version precomputes integration by parts and assigns domains to workers. Discrete datasets attach ρ statistics through domain_task_extra rather than a forked parallel loop.
   - eval_term() / eval_prime(): Evaluate primes (dataset-specific in subclasses), multiply, and integrate over domains.
   - int_by_parts(): Symbolically integrate by parts across dimensions before evaluation.
   - diff(): Apply finite-difference operators to data.
@@ -52,7 +52,7 @@
 ### continuous/process_library_terms.py.SRDataset
 - make_domains(): Create domains over a fixed grid.
 - eval_prime(): Slice continuous fields and apply finite differences for derivative orders.
-- make_libraries(), find_scales(), get_char_size(): Continuous variants using field statistics and length/time scaling.
+- generate_library_terms() / find_scales() / get_char_size(): Continuous variants using field statistics and length/time scaling.
 
 ### discrete/library.py
 - CoarseGrainedProduct: Represents ρ[·] applied to products of `Observable`s; enables discrete term construction.
@@ -60,15 +60,20 @@
 
 ### discrete/process_library_terms.py.SRDataset
 - __post_init__(): Set spacings and kernel scales from physical units and coarse-graining resolution.
-- make_libraries(): Partition terms by requested irreps, including anti/STF filters for rank-2.
+- generate_library_terms(): Discrete term enumeration; shared irrep partitioning lives on AbstractDataset.
 - make_domains(): Spatial padding and optional time padding on the scaled grid.
 - eval_prime(): Coarse grain particle data to a grid using polynomial kernels (KDTree/numba) or periodic variants; optional temporal smoothing; apply derivatives; rescale by ρ.
-- make_Q_parallel(): Parallel domain evaluation and collection of per-domain ρ statistics for scaling.
+- domain_task_extra() / consume_domain_task_extras(): Collect per-domain ρ statistics during the shared parallel evaluation.
 - find_scales(), get_char_size(): Use dataset statistics (including ρ domain std) to compute characteristic sizes (length/time scaled).
 
 ### discrete/coarse_grain_utils.py
 - gaussian_coarse_grain2d / kd_gaussian_coarse_grain2d: Coarse-grained estimates using Gaussian kernels; KDTree variant restricts to nearby points for speed.
 - periodic_* variants: Periodic boundary handling via image replication with the same kernels.
 
-### commons/integration_schemes.py 
-- int_arr(...): Integrates an array of values on an integration domain using quadrature pipeline, initiated in quadrature_schemes.py. Arguments allow one to configure particular quadrature scheme. See documentation.
+### commons/integration.py
+- int_arr(...): Integrates an array of values on an integration domain using the quadrature pipeline in quadrature_schemes.py. Configure the rule per axis via `schemes_and_options` (trapezoidal, Clenshaw–Curtis / Chebyshev–Lobatto, Chebyshev–Gauss / DEDALUS, truncated Chebyshev subgrids, or moment-matching).
+
+### commons/quadrature_schemes.py
+- mapped_chebyshev_nodes / mapped_chebyshev_gauss_nodes: Affine maps of Chebyshev–Lobatto (extrema) and Chebyshev–Gauss (DEDALUS roots) grids.
+- clenshaw_curtis_weights / chebyshev_gauss_weights: Interpolatory weights via DCT-I (Lobatto) and DCT-III (Gauss / Fejér I).
+- truncated_*_nodes, moment_matched_quad_weights: Subgrid and arbitrary-node rules.

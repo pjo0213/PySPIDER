@@ -1,9 +1,9 @@
 import numpy as np
 
 from ..commons.process_library_terms import (
-    AbstractDataset, IntegrationDomain, LibraryData, diff, get_slice
+    AbstractDataset, IntegrationDomain, diff, get_slice
 )
-from ..commons.z3base import LiteralIndex, FullRank, Antisymmetric, SymmetricTraceFree
+from ..commons.z3base import LiteralIndex
 from .library import generate_terms_to
 
 class SRDataset(AbstractDataset):
@@ -39,50 +39,12 @@ class SRDataset(AbstractDataset):
         #print(prime.derivative, dimorders)
         return (diff(data_slice, dimorders, self.diff_spacings(domain))
                 if sum(dimorders) > 0 else data_slice)
-    
-    def make_libraries(self, **kwargs):
-        self.libs = dict()
-        terms = generate_terms_to(observables=self.observables, **kwargs)
-        for irrep in self.irreps:
-            match irrep:
-                case int():
-                    self.libs[irrep] = LibraryData(
-                        [term for term in terms if term.rank == irrep], irrep
-                    )
-                case FullRank():
-                    self.libs[irrep] = LibraryData(
-                        [term for term in terms if term.rank == irrep.rank], irrep
-                    )
-                case Antisymmetric():
-                    self.libs[irrep] = LibraryData(
-                        [term for term in terms if term.rank == irrep.rank 
-                         and term.symmetry() != 1], irrep
-                    )
-                case SymmetricTraceFree():
-                    self.libs[irrep] = LibraryData(
-                        [term for term in terms if term.rank == irrep.rank 
-                         and term.symmetry() != -1], irrep
-                    )
-                case _:
-                    raise NotImplemented
 
+    def generate_library_terms(self, **kwargs):
+        return generate_terms_to(observables=self.observables, **kwargs)
 
     def find_scales(self, names=None):
-        # find mean/std deviation of fields in data_dict that are in names
-        self.scale_dict = dict()
-        for name in self.data_dict:
-            if names is None or name in names:
-                self.scale_dict[name] = dict()
-                # if these are vector quantities the results could be wonky in the 
-                # unlikely case a vector field is consistently aligned with one 
-                # of the axes
-                self.scale_dict[name]['mean'] = np.mean(
-                    np.linalg.norm(self.data_dict[name]) / 
-                    np.sqrt(self.data_dict[name].size)
-                )
-                if np.isnan(self.scale_dict[name]['mean']):
-                    raise ValueError(f'NaNs present in field {name} - please replace with numeric data and try again')
-                self.scale_dict[name]['std'] = np.std(self.data_dict[name])
+        self._record_field_scales(names, check_nan=True)
 
     def get_char_size(self, term):
         # return characteristic size of a library term
