@@ -148,7 +148,7 @@ def _chebyshev_gauss(arr, opts, weight=None, axis=0):
         )
     qw = chebyshev_gauss_weights(nodes.shape[0], a, b, weight=weight, axis=axis)
     # Weights already match mapped_chebyshev_gauss_nodes. Flip only if the
-    # caller passed the descending (DEDALUS-style) ordering.
+    # caller passed descending Gauss nodes.
     expected_asc = mapped_chebyshev_gauss_nodes(nodes.shape[0], a, b)
     if np.allclose(nodes, expected_asc[::-1], rtol=0, atol=1e-12):
         qw = qw[::-1]
@@ -264,17 +264,17 @@ def int_arr(arr, schemes_and_options=None, weight=None):
       truncated-cc-grid. Optional ``nodes`` must be that full mapped
       Lobatto grid (ascending or descending).
     - chebyshev-gauss: optional ``interval`` (default [-1, 1]), the
-      affine image of the full Chebyshev-Gauss / DEDALUS roots grid.
-      A ``Weight`` stays on [-1, 1]; ``interval`` only supplies the
-      Jacobian (b-a)/2. Grid size is n (array length). Weights come
+      affine image of the full Chebyshev-Gauss (first-kind / interior)
+      grid. A ``Weight`` stays on [-1, 1]; ``interval`` only supplies
+      the Jacobian (b-a)/2. Grid size is n (array length). Weights come
       from a DCT-III of Chebyshev moments (Fejér's first rule). For
       W(x)f(x) on a proper subinterval use truncated-cg-grid. Optional
-      ``nodes`` must be that full mapped Gauss grid (ascending, or
-      descending Dedalus order).
+      ``nodes`` must be that full mapped Gauss grid (ascending or
+      descending).
     - truncated-cc-grid: ``interval`` (default [-1, 1]) and either
       ``nodes`` or ``num_intervals`` of the parent Lobatto grid
     - truncated-cg-grid: ``interval`` (default [-1, 1]) and either
-      ``nodes`` or ``num_nodes`` of the parent Gauss / DEDALUS grid
+      ``nodes`` or ``num_nodes`` of the parent Gauss grid
     - moment-matching: ``nodes`` and ``interval`` (the arbitrary node
       set; the weight function is the ``Weight``, not a scheme option)
     """

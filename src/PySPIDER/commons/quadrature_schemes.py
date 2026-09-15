@@ -43,7 +43,7 @@ def mapped_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
     Affinely map the Chebyshev-Gauss nodes from [-1, 1] onto [a, b].
 
-    These are the roots of T_n (first-kind / DEDALUS interior grid). Uses
+    These are the roots of T_n (first-kind / interior nodes). Uses
     `numpy.polynomial.chebyshev.chebpts1` for the reference nodes, then
     applies x -> (a+b)/2 + (b-a)/2 * x and returns them sorted ascending.
     Unlike Lobatto, the endpoints ±1 are not included.
@@ -106,7 +106,7 @@ def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     Return the Chebyshev-Gauss nodes that fall within [a, b].
 
     The full reference grid is generated with
-    `numpy.polynomial.chebyshev.chebpts1` (the first-kind / DEDALUS roots
+    `numpy.polynomial.chebyshev.chebpts1` (the first-kind / interior-node
     grid on [-1, 1]) and only the subset lying in [a, b] (within a
     floating-point tolerance) is retained, sorted ascending.
 
@@ -237,8 +237,8 @@ def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Opt
     """
     Return n when nodes are a full Gauss grid affinely mapped onto [a, b].
 
-    Accepts ascending or descending node orderings. n is the number of nodes
-    (DEDALUS Chebyshev size), not the number of Lobatto intervals.
+    Accepts ascending or descending node orderings. n is the number of
+    Gauss nodes, not the number of Lobatto intervals.
     """
     nodes = np.asarray(nodes, dtype=float)
     if nodes.size < 1:
@@ -268,8 +268,9 @@ def _fejer_weights_from_moments(mu: np.ndarray) -> np.ndarray:
         w_j = (1/n) [ μ_0 + 2 sum_{k=1}^{n-1} μ_k T_k(x_j) ],
 
     which is scipy's unnormalized DCT-III of the moments (type=3) divided by n.
-    DCT-III emits weights for the descending Dedalus ordering (near 1 -> near
-    -1); reverse so they match ascending ``chebpts1`` / ``mapped_chebyshev_gauss_nodes``.
+    DCT-III emits weights for ``x_j = cos(pi (2j+1) / (2n))`` (near 1 ->
+    near -1); reverse so they match ascending ``chebpts1`` /
+    ``mapped_chebyshev_gauss_nodes``.
     """
     n = mu.shape[0]
     if n < 1:
@@ -334,14 +335,14 @@ def chebyshev_gauss_weights(
         integral_a^b w(s(x)) f(x) dx,
 
     where s maps [a, b] onto [-1, 1] and the nodes are the roots of T_n
-    (DEDALUS Chebyshev grid). ``w`` is 1 or one axis of a PySPIDER
-    ``Weight``. Uses reference DCT-III (Fejér-I) weights times the affine
-    Jacobian (b-a)/2. Weights are in ascending order.
+    (first-kind / interior Chebyshev-Gauss grid). ``w`` is 1 or one axis of a
+    PySPIDER ``Weight``. Uses reference DCT-III (Fejér-I) weights times the
+    affine Jacobian (b-a)/2. Weights are in ascending order.
 
     Parameters
     ----------
     num_nodes : int
-        Number of Gauss nodes n; the grid has n nodes (Dedalus Chebyshev size).
+        Number of Gauss nodes n; the grid has n nodes.
     a, b : float, optional
         Interval endpoints; default [-1, 1].
     weight : optional

@@ -71,9 +71,9 @@
 - periodic_* variants: Periodic boundary handling via image replication with the same kernels.
 
 ### commons/integration.py
-- int_arr(...): Integrates an array of values on an integration domain using the quadrature pipeline in quadrature_schemes.py. Configure the rule per axis via `schemes_and_options` (trapezoidal, Clenshaw–Curtis / Chebyshev–Lobatto, Chebyshev–Gauss / DEDALUS, truncated Chebyshev subgrids, or moment-matching).
+- int_arr(...): Integrates an array of values on an integration domain using the quadrature pipeline in quadrature_schemes.py. Configure the rule per axis via `schemes_and_options` (trapezoidal, Clenshaw–Curtis / Chebyshev–Lobatto, Chebyshev–Gauss, truncated Chebyshev subgrids, or moment-matching).
 
 ### commons/quadrature_schemes.py
-- mapped_chebyshev_nodes / mapped_chebyshev_gauss_nodes: Affine maps of Chebyshev–Lobatto (extrema) and Chebyshev–Gauss (DEDALUS roots) grids.
+- mapped_chebyshev_nodes / mapped_chebyshev_gauss_nodes: Affine maps of Chebyshev–Lobatto (extrema) and Chebyshev–Gauss (first-kind roots / interior nodes) grids.
 - clenshaw_curtis_weights / chebyshev_gauss_weights: Interpolatory weights via DCT-I (Lobatto) and DCT-III (Gauss / Fejér I).
 - truncated_*_nodes, moment_matched_quad_weights: Subgrid and arbitrary-node rules.
