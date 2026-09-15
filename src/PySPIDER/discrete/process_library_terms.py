@@ -12,13 +12,70 @@ from scipy.ndimage import gaussian_filter1d
 from .coarse_grain_utils import poly_coarse_grain_time_slices, periodic_poly_coarse_grain_time_slices 
 
 from ..commons.process_library_terms import (
-    AbstractDataset, IntegrationDomain, diff
+    AbstractDataset, IntegrationDomain, LibraryData, int_by_parts, diff
 )
 from ..commons.library import LibraryPrime #, Observable
-from ..commons.z3base import LiteralIndex
+from ..commons.z3base import (
+    LiteralIndex, FullRank, Antisymmetric, SymmetricTraceFree
+)
 from ..commons.utils import regex_find
 from .convolution import gauss1d
-from .library import generate_terms_to
+from .library import generate_terms_to #, CoarseGrainedProduct
+
+import concurrent.futures
+from collections import defaultdict
+
+# function for initializing global variables for each parallel worker process 
+# (discrete version)
+def discrete_init_domain_worker(
+    dataset_init, current_irrep_init, by_parts_init, debug_init
+):
+    global worker_dataset, worker_current_irrep, worker_by_parts, worker_debug
+    worker_dataset = dataset_init
+    worker_current_irrep = current_irrep_init
+    worker_by_parts = by_parts_init
+    worker_debug = debug_init
+
+# function to be executed in parallel to evaluate all terms for a given domain 
+# (discrete version with rho handling)
+def discrete_parallel_domain_task(domain):
+    dataset = worker_dataset
+    irrep = worker_current_irrep
+    by_parts = worker_by_parts
+    debug = worker_debug
+
+    domain_results_dict = defaultdict(float)
+    rho_std_for_domain = None
+
+    for t, w, term, tensor_weight in dataset.integrated_terms_tuples:
+        if w.scale == 0:
+            continue
+        value = dataset.eval_on_domain(t,w,domain)
+        key = term, tensor_weight
+        domain_results_dict[key] += value
+    
+    # Compute rho standard deviation before cleanup (if cleanup is enabled)
+    if dataset.cleanup_cache and dataset.field_dict is not None:
+        # Find ρ prime and compute its std for this domain
+        for key in dataset.field_dict.keys():
+            if len(key) == 2 and key[1] == domain:
+                prime = key[0]
+                # Check if this prime corresponds to rho 
+                # (string representation is exactly 'ρ')
+                if hasattr(prime, '__str__') and 'ρ' == str(prime):
+                    rho_data = dataset.field_dict[key]
+                    rho_std_for_domain = np.std(rho_data)
+                    break  # Found ρ prime, no need to continue
+        
+        # Free up memory by removing cached field_dict entries for this domain
+        keys_to_remove = [
+            key for key in dataset.field_dict.keys() 
+            if len(key) == 2 and key[1] == domain
+        ]
+        for key in keys_to_remove:
+            del dataset.field_dict[key]
+    
+    return domain, domain_results_dict, rho_std_for_domain
 
 @dataclass(kw_only=True)
 # structures all data associated with a given sparse regression dataset
@@ -71,24 +128,31 @@ class SRDataset(AbstractDataset):
             return int(self.world_size[axis] * self.cg_res)
         return int(self.world_size[-1])
 
-    def generate_library_terms(self, **kwargs):
-        return generate_terms_to(observables=self.observables, **kwargs)
-
-    def domain_task_extra(self, domain):
-        # When the cache is about to be cleared, snapshot ρ std for find_scales.
-        if not self.cleanup_cache or self.field_dict is None:
-            return None
-        for key in self.field_dict.keys():
-            if len(key) == 2 and key[1] == domain:
-                prime = key[0]
-                if hasattr(prime, '__str__') and 'ρ' == str(prime):
-                    return np.std(self.field_dict[key])
-        return None
-
-    def consume_domain_task_extras(self, extras):
-        rho_stds = [extra for extra in extras if extra is not None]
-        if rho_stds:
-            self.rho_domain_stds = rho_stds
+    def make_libraries(self, **kwargs):
+        self.libs = dict()
+        terms = generate_terms_to(observables=self.observables, **kwargs)
+        for irrep in self.irreps:
+            match irrep:
+                case int():
+                    self.libs[irrep] = LibraryData(
+                        [term for term in terms if term.rank == irrep], irrep
+                    )
+                case FullRank():
+                    self.libs[irrep] = LibraryData(
+                        [term for term in terms if term.rank == irrep.rank], irrep
+                    )
+                case Antisymmetric():
+                    self.libs[irrep] = LibraryData(
+                        [term for term in terms if term.rank == irrep.rank 
+                         and term.symmetry() != 1], irrep
+                    )
+                case SymmetricTraceFree():
+                    self.libs[irrep] = LibraryData(
+                        [term for term in terms if term.rank == irrep.rank 
+                         and term.symmetry() != -1], irrep
+                    )
+                case _:
+                    raise NotImplementedError
 
     def make_domains(self, ndomains, domain_size, pad=0, t_pad=0):
         self.domains = []
@@ -307,7 +371,18 @@ class SRDataset(AbstractDataset):
         return diff(data_slice, dimorders, self.diff_spacings(domain)) if sum(dimorders)>0 else data_slice
 
     def find_scales(self, names=None):
-        self._record_field_scales(names)
+        # find mean/std deviation of fields in data_dict that are in names
+        self.scale_dict = dict()
+        for name in self.data_dict:
+            if names is None or name in names:
+                self.scale_dict[name] = dict()
+                # if these are vector quantities the results could be wonky in the 
+                # unlikely case a vector field is consistently aligned with one of the axes
+                self.scale_dict[name]['mean'] = np.mean(
+                    np.linalg.norm(self.data_dict[name]) / 
+                    np.sqrt(self.data_dict[name].size)
+                )
+                self.scale_dict[name]['std'] = np.std(self.data_dict[name])
         # also need to handle density separately
         self.scale_dict['rho'] = dict()
         #self.rho_scale = self.particle_pos.shape[0] / np.prod(self.world_size[:-1])
@@ -359,3 +434,82 @@ class SRDataset(AbstractDataset):
             product /= self.xscale ** xorder
             product /= self.tscale ** torder
         return product
+
+    def make_Q_parallel(self, irrep, by_parts=True, debug=False, num_processors=None):
+        """Override parent method to handle rho statistics for discrete datasets"""
+        # Main method logic (adapted from parent)
+        init_args = (self, irrep, by_parts, debug)
+        domains = self.domains
+        all_results = []
+        rho_stds = []
+
+        #precompute symbolic manipulations for parallel tasks
+        self.integrated_terms_tuples = []
+        for term in list(self.libs[irrep].terms):
+            if debug:
+                print("UNINDEXED TERM:")
+                print(term)
+                term_symmetry = term.symmetry()
+                print("Symmetry:", term_symmetry)
+            for weight in list(self.weights):
+                for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
+                    if debug:
+                        print("Tensor weight:", tensor_weight)
+                    for indexed_term, scalar_weight in self.get_index_assignments(
+                        term, tensor_weight
+                    ):  # , debug
+                        if debug:
+                            print("ASSIGNMENTS:", term, "->")
+                            print("Indexed term:", indexed_term)
+                            print("Scalar weight:", scalar_weight)
+                        for t, w in int_by_parts(indexed_term, scalar_weight, by_parts):
+                            if debug:
+                                print("INT BY PARTS:", indexed_term, "->")
+                                print("Integrated term:", t)
+                                print("Integrated weight:", w)
+                            self.integrated_terms_tuples.append(
+                                (t, w, term, tensor_weight)
+                            )
+
+        #begin parallel task execution
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_processors, 
+            initializer=discrete_init_domain_worker, 
+            initargs=init_args
+        ) as executor:
+            results = executor.map(discrete_parallel_domain_task, domains)
+            for result in results:
+                domain, domain_results, rho_std = result
+                all_results.append((domain, domain_results))
+                if rho_std is not None:
+                    rho_stds.append(rho_std)
+        
+        # Store rho standard deviations for later use in find_scales
+        if rho_stds:
+            self.rho_domain_stds = rho_stds
+                  
+        terms = list(self.libs[irrep].terms)
+        weights = list(self.weights)
+        num_cols = len(terms)
+        term_to_col_idx = {term: i for i, term in enumerate(terms)}
+        row_map = {}
+        current_row_idx = 0
+        for weight in weights:
+            for tensor_weight in self.tensor_weight_basis[(irrep, weight)].tw_list:
+                for domain in domains:
+                    row_key = (tensor_weight, domain)
+                    if row_key not in row_map:
+                        row_map[row_key] = current_row_idx
+                        current_row_idx += 1
+        num_rows = current_row_idx
+
+        Q_matrix = np.zeros((num_rows, num_cols), dtype=np.float64)
+
+        for domain, domain_results in all_results:
+            for (term, tensor_weight), result in domain_results.items():
+                col_idx = term_to_col_idx[term]
+                row_idx = row_map[(tensor_weight, domain)]
+
+                Q_matrix[row_idx, col_idx] = result
+
+        return Q_matrix
