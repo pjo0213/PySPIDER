@@ -138,7 +138,7 @@ def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
         )
     return kept
 
-def _chebyshev_coefficients_from_values(f_values: np.ndarray) -> np.ndarray:
+def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
     """
     Compute Chebyshev coefficients from Lobatto-grid samples via a DCT-I.
 
@@ -161,7 +161,7 @@ def _chebyshev_coefficients_from_values(f_values: np.ndarray) -> np.ndarray:
     a = dct(np.asarray(f_values, dtype=float), type=1) / N
     a[0] *= 0.5
     a[-1] *= 0.5
-    return a
+    return a[::-1]
 
 def _ensure_weight_ready(weight) -> None:
     if not getattr(weight, "ready", False) or weight.weight_objs is None:
@@ -252,22 +252,9 @@ def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Opt
         return n
     return None
 
-def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
-    """Clenshaw-Curtis node weights from Chebyshev moments via DCT-I.
-
-    DCT-I emits weights for ``x_j = cos(pi j / N)`` (1 -> -1). Reverse so
-    they are ascending.
-    """
-    return _chebyshev_coefficients_from_values(mu)[::-1]
-
 def _fejer_weights_from_moments(mu: np.ndarray) -> np.ndarray:
     """Chebyshev-Gauss (Fejér-I) node weights from Chebyshev moments via DCT-III.
 
-    For n Gauss nodes x_j = cos(π (2j+1) / (2n)), interpolatory weights are
-
-        w_j = (1/n) [ μ_0 + 2 sum_{k=1}^{n-1} μ_k T_k(x_j) ],
-
-    which is scipy's unnormalized DCT-III of the moments (type=3) divided by n.
     DCT-III emits weights for ``x_j = cos(pi (2j+1) / (2n))`` (near 1 ->
     near -1); reverse so they match ascending ``chebpts1`` /
     ``mapped_chebyshev_gauss_nodes``.
