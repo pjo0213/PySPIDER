@@ -155,10 +155,10 @@ def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
     np.ndarray
         Chebyshev coefficients a_0, ..., a_N.
     """
-    N = f_values.shape[0] - 1
+    N = mu.shape[0] - 1
     if N < 1:
         raise ValueError("At least two sample points (N>=1) are required")
-    a = dct(np.asarray(f_values, dtype=float), type=1) / N
+    a = dct(np.asarray(mu, dtype=float), type=1) / N
     a[0] *= 0.5
     a[-1] *= 0.5
     return a[::-1]
