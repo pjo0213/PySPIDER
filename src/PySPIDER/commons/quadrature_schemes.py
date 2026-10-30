@@ -8,7 +8,6 @@ from numpy.polynomial.chebyshev import (
 )
 from scipy.fft import dct
 
-
 #helper function used quite a bit
 def _validate_interval(a: float, b: float) -> None:
     if a > b:
@@ -18,13 +17,12 @@ def mapped_chebyshev_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
     Affinely map the Chebyshev-Lobatto nodes from [-1, 1] onto [a, b].
 
-    Uses `numpy.polynomial.chebyshev.chebpts2` for the reference nodes, then
-    applies x -> (a+b)/2 + (b-a)/2 * x and returns them sorted ascending.
+    Applies the map x -> (a+b)/2 + (b-a)/2 * x and returns the new nodes sorted ascending.
 
     Parameters
     ----------
     n : int
-        Number of nodes to be produced.
+        Number of nodes to be produced. Must be greater than 1.
     a : float
         Left endpoint of the target interval.
     b : float
@@ -47,23 +45,18 @@ def mapped_chebyshev_nodes(n: int, a: float, b: float) -> np.ndarray:
 
     """
     _validate_interval(a, b)
-    if n < 1:
-        raise ValueError("n must be >= 1")
     return (0.5 * (a + b) + 0.5 * (b - a) * chebpts2(n))
 
 def mapped_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
     Affinely map the Chebyshev-Gauss nodes from [-1, 1] onto [a, b].
 
-    These are the roots of T_n (first-kind / interior nodes). Uses
-    `numpy.polynomial.chebyshev.chebpts1` for the reference nodes, then
-    applies x -> (a+b)/2 + (b-a)/2 * x and returns them sorted ascending.
-    Unlike Lobatto, the endpoints ±1 are not included.
+    Applies the map x -> (a+b)/2 + (b-a)/2 * x and returns the new nodes sorted ascending.
 
     Parameters
     ----------
     n : int
-        Number of nodes to be produced.
+        Number of nodes to be produced. Must be greater than 0.
     a : float
         Left endpoint of the target interval.
     b : float
@@ -86,31 +79,26 @@ def mapped_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
 
     """
     _validate_interval(a, b)
-    if n < 1:
-        raise ValueError("n must be >= 1")
     return (0.5 * (a + b) + 0.5 * (b - a) * chebpts1(n))
 
 def truncated_chebyshev_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
-    Return the Chebyshev-Lobatto nodes that fall within [a, b].
-
-    The full reference grid is generated with
-    `numpy.polynomial.chebyshev.chebpts2` and only the subset lying in
-    [a, b] (within a floating point tolerance) is retained, sorted ascending.
+    Returns the Chebyshev-Lobatto nodes that fall within [a, b] (assuming [a, b] is a subset of [-1, 1]), by retaining
+    nodes within a floating point tolerance. Output is sorted ascending.
 
     Parameters
     ----------
     n : int
-        Number of nodes of the underlying reference grid.
+        Number of Chebyshev-Lobatto nodes in [-1, 1].
     a : float
-        Left endpoint of the retained interval.
+        Left endpoint of given interval.
     b : float
-        Right endpoint of the retained interval.
+        Right endpoint of given interval.
 
     Returns
     -------
     np.ndarray
-        Array of the reference nodes contained in [a, b].
+        Array of the Chebyshev-Lobatto nodes contained in [a, b] from the underlying [-1, 1].
 
     Examples
     --------
@@ -133,33 +121,29 @@ def truncated_chebyshev_nodes(n: int, a: float, b: float) -> np.ndarray:
     kept = nodes[mask]
     if kept.size == 0:
         raise ValueError(
-            f"No Chebyshev-Lobatto nodes from reference grid n = {n} lie in [{a}, {b}]. "
+            f"No Chebyshev-Lobatto nodes from [-1, 1] with {n} nodes lie in [{a}, {b}]. "
             "Increase num_nodes or widen the interval."
         )
     return kept
 
 def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     """
-    Return the Chebyshev-Gauss nodes that fall within [a, b].
-
-    The full reference grid is generated with
-    `numpy.polynomial.chebyshev.chebpts1` (the first-kind / interior-node
-    grid on [-1, 1]) and only the subset lying in [a, b] (within a
-    floating point tolerance) is retained, sorted ascending.
+    Returns the Chebyshev-Gauss nodes that fall within [a, b] (assuming [a, b] is a subset of [-1, 1]), by retaining
+    nodes within a floating point tolerance. Output is sorted ascending.
 
     Parameters
     ----------
     n : int
-        Number of nodes of the underlying reference grid.
+        Number of Chebyshev-Gauss nodes in [-1, 1].
     a : float
-        Left endpoint of the retained interval.
+        Left endpoint of given interval.
     b : float
-        Right endpoint of the retained interval.
+        Right endpoint of given interval.
 
     Returns
     -------
     np.ndarray
-        Array of the reference Gauss nodes contained in [a, b].
+        Array of the Chebyshev-Gauss nodes contained in [a, b] from the underlying [-1, 1].
 
     Examples
     --------
@@ -182,7 +166,7 @@ def truncated_chebyshev_gauss_nodes(n: int, a: float, b: float) -> np.ndarray:
     kept = nodes[mask]
     if kept.size == 0:
         raise ValueError(
-            f"No Chebyshev-Gauss nodes from reference grid n = {n} lie in [{a}, {b}]. "
+            f"No Chebyshev-Gauss nodes from [-1, 1] with {n} nodes lie in [{a}, {b}]. "
             "Increase num_nodes or widen the interval."
         )
     return kept
@@ -192,7 +176,7 @@ def _clenshaw_curtis_from_moments(mu: np.ndarray) -> np.ndarray:
     Compute Clenshaw-Curtis quadrature weights using DCT-I.
 
     Given moments of the form mu_k = integral_-1^1 w(x) T_k(x) dx, calculates
-    quadrature weights using scipy's DCT-I.
+    quadrature weights using DCT-I.
 
     Parameters
     ----------
@@ -245,8 +229,7 @@ def _unweighted_moments(a: float, b: float, max_degree: int) -> np.ndarray:
     Compute the unweighted Chebyshev moments analytically.
 
     Returns mu_k = integral_a^b T_k(x) dx by integrating the Chebyshev basis
-    with `numpy.polynomial.chebyshev.chebint` (antiderivative vanishing at a)
-    and evaluating at b.
+    (antiderivative vanishing at a) and evaluating at b.
 
     Parameters
     ----------
@@ -267,10 +250,10 @@ def _unweighted_moments(a: float, b: float, max_degree: int) -> np.ndarray:
 #used in integration.py
 def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
-    Return N when nodes are a full Lobatto grid affinely mapped onto [a, b].
+    Return N when nodes are a full Chebyshev-Lobatto grid affinely mapped onto [a, b].
 
     Accepts ascending or descending node orderings.
-    Returns None when the nodes do not match a full mapped Lobatto grid.
+    Returns None when the nodes do not match a full mapped Chebyshev-Lobatto grid.
     """
     nodes = np.asarray(nodes, dtype=float)
     if nodes.size < 2:
@@ -286,11 +269,10 @@ def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> O
 
 def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
-    Return n when nodes are a full Gauss grid affinely mapped onto [a, b].
+    Return N when nodes are a full Chebyshev-Lobatto grid affinely mapped onto [a, b].
 
-    Accepts ascending or descending node orderings. n is the number of
-    Gauss nodes, not the number of Lobatto intervals.
-    Returns None when the nodes do not match a full mapped Gauss grid.
+    Accepts ascending or descending node orderings.
+    Returns None when the nodes do not match a full mapped Chebyshev-Lobatto grid.
     """
     nodes = np.asarray(nodes, dtype=float)
     if nodes.size < 1:
@@ -342,7 +324,7 @@ def clenshaw_curtis_weights(
     a, b : float, optional
         Interval endpoints; default [-1, 1].
     weight : optional
-        PySPIDER Weight; moments use that object's attributes for ``axis``.
+        Weight function; moments use that object's attributes for ``axis``.
     axis : int, optional
         Axis of ``weight`` to use.
 
