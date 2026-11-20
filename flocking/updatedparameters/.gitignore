@@ -1,0 +1,11 @@
+__pycache__/
+.ipynb_checkpoints/
+runs/
+
+# Local research artifacts; keep run evidence out of the repository.
+/history/
+/kernel-sensitivity/
+/refinement/
+
+# The notebook reads this input; the repository ignores other JSON files.
+!/config.json
