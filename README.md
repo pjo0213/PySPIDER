@@ -14,6 +14,10 @@ Please check out [my dissertation](https://github.com/sibirica/PySPIDER/blob/mai
 ## Getting started
 The "tutorials" directory contains demonstrations of how to use PySPIDER to learn models for both [continuous](https://github.com/sibirica/PySPIDER/blob/main/tutorials/01_Continuous.ipynb) and [discrete](https://github.com/sibirica/PySPIDER/blob/main/tutorials/02_Discrete.ipynb) systems. 
 
+For nonuniform grids, [Quadrature in PySPIDER](tutorials/03_Quadrature.ipynb) shows how to choose a rule per axis and integrate windows of continuous fields or particle snapshots. See the [integration overview](PySPIDER_overview.md#commonsintegrationpy) for coordinate and weight conventions.
+
+From a source checkout with the package dependencies installed, run the focused quadrature checks with `PYTHONPATH=src python -m unittest discover -s tests -p test_quadrature_public_api.py`.
+
 ### Installation
 PySPIDER is now available on PyPI. To install:
 

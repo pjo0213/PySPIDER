@@ -80,6 +80,31 @@ def discrete_parallel_domain_task(domain):
 @dataclass(kw_only=True)
 # structures all data associated with a given sparse regression dataset
 class SRDataset(AbstractDataset):
+    """Weak-form dataset for fields coarse-grained from particle snapshots.
+
+    Spatial kernels are evaluated on a uniform lattice with spacing
+    ``1 / cg_res``. Passing ``grids`` records physical sample coordinates
+    for differentiation and quadrature; it does not move the kernel targets.
+    Leave spatial entries as ``None`` for the built-in lattice. The final
+    entry can be a one-dimensional array of actual snapshot times, in frame
+    order; use ``None`` for uniform time spacing ``deltat``.
+    If supplying ``grids``, include one entry per spatial axis and one for
+    time. Temporal smoothing (``time_sigma``, default zero) uses frame
+    offsets, so equal offsets need not span equal times on a nonuniform grid.
+
+    ``schemes_and_options`` uses the per-axis format in
+    ``PySPIDER.commons.integration.int_arr``. For example, in two spatial
+    dimensions, ``grids=[None, None, times]`` with
+    ``schemes_and_options={2: 'truncated-cg-grid'}`` integrates each window
+    of Gauss-sampled frames over its actual time slice, from first to last
+    retained time in ascending order. A full Gauss rule requires a complete
+    mapped grid in each window. The two omitted spatial axes use trapezoids
+    with spacing one. For an integral in physical units, multiply this
+    example's raw result by ``(1 / cg_res)**2``; the time integral already
+    includes its physical interval. Weight derivatives use physical support
+    half-widths independently of this conversion.
+    """
+
     # array of particle positions (particle, spatial index, time)
     particle_pos: np.ndarray[float]
     # standard deviation of kernel in physical units (scalar for now)
@@ -112,7 +137,7 @@ class SRDataset(AbstractDataset):
         super().__post_init__()
         self.scaled_sigma = self.kernel_sigma * self.cg_res
         self.scaled_pts = self.particle_pos * self.cg_res
-        # Uniform coarse-grained lattice spacing; non-uniform axes use grids in FinDiff only.
+        # Nominal spacings; explicit grids supply coordinates to derivatives and quadrature.
         self.dxs = [1 / self.cg_res] * (self.n_dimensions - 1) + [float(self.deltat)]
         self.rho_domain_stds = None  # Initialize rho statistics storage
         # self.rho_scale = (self.particle_pos.shape[0] / 

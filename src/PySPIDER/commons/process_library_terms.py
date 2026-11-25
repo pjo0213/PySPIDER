@@ -367,7 +367,7 @@ def parallel_domain_task(domain):
 @dataclass(kw_only=True)
 class AbstractDataset(object): # template for structure of all data associated with a given sparse regression dataset
     world_size: list[float] # linear dimensions of dataset in physical units (spatial + time)
-    data_dict: dict[Observable, np.ndarray[float]] # observable -> array of values (e.g. discrete - particle, spatial index, time)
+    data_dict: dict[str, np.ndarray] # observable name -> sampled field array
     observables: list[Observable]  # list of observables
     # storage of computed quantities: (prim, domains) [not dims] -> array
     cache_primes: bool = True # whether the field_dict is used
@@ -402,15 +402,8 @@ class AbstractDataset(object): # template for structure of all data associated w
 
     integrated_terms_tuples: list[tuple[LibraryTerm, Weight, LibraryTerm, TensorWeight]] = None # for tracking parallel domain tasks
 
-    # Quadrature schemes and corresponding options.
-    # Omitted axes use trapezoidal. See int_arr for options.
-    # The weight function is passed separately into int_arr; this dict only
-    # selects the rule per axis
-    #   "trapezoidal"       composite trapezoidal rule
-    #   "truncated-cc-grid" Chebyshev subgrid (moment-matching on a Lobatto subset)
-    #   "clenshaw-curtis"   full mapped Lobatto grid
-    #   "moment-matching"   arbitrary nodes
-    # e.g. {2: "clenshaw-curtis"}
+    # Per-axis rules and options; see int_arr for all six schemes.
+    # Omitted axes use trapezoidal. Weights are supplied separately.
     schemes_and_options: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -618,6 +611,18 @@ class AbstractDataset(object): # template for structure of all data associated w
             raise NotImplemented
     
     def eval_on_domain(self, term, weight, domain, debug=False):
+        """Integrate a library term with a separable weight over one window.
+
+        Weight derivatives use the window's physical support half-widths.
+        The returned integral uses each rule's own measure: spacing one on
+        trapezoidal axes, and the selected interval on mapped or moment-based
+        axes. To express a raw integral in physical coordinates, multiply by
+        each uniform trapezoidal spacing and by the physical-to-rule interval
+        length ratio for each axis integrated in reference coordinates. Use
+        the ratio for this window: if physical widths vary, the corresponding
+        matrix rows need different factors. Axes already integrated over a
+        physical interval need no further factor.
+        """
         term_arr = self.eval_term(term, domain, debug)
         if debug:
             filtered_flat = list(filter(lambda x: x!=0, term_arr.flat))

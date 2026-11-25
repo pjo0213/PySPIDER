@@ -7,6 +7,45 @@ from ..commons.z3base import LiteralIndex, FullRank, Antisymmetric, SymmetricTra
 from .library import generate_terms_to
 
 class SRDataset(AbstractDataset):
+    """Weak-form dataset for fields sampled on a spatial grid and in time.
+
+    Pass ``grids`` at construction to describe where the fields in ``data_dict``
+    were evaluated. Supply one entry per sampling axis (space, then time): a
+    one-dimensional array of physical coordinates, or ``None`` for a uniform
+    axis with spacing ``dxs[i]``. Component indices are not sampling axes.
+    Derivatives use these coordinates; no data are interpolated.
+
+    ``schemes_and_options`` selects the integration rule per axis, in the
+    format documented by ``PySPIDER.commons.integration.int_arr``. Omitted
+    axes use trapezoids with spacing one. A full Lobatto or Gauss rule must
+    match the nodes in every integration window. For a proper subset, select
+    the corresponding truncated rule: with ``grids[i]`` supplied and no
+    explicit nodes, parent count, or interval, it uses the coordinate slice
+    and integrates from its smallest to its largest sample. Weight derivatives
+    use the physical support half-width even if the rule integrates over an
+    explicitly supplied reference interval.
+
+    Examples
+    --------
+    Integrate the constant term with a constant weight on a full Lobatto axis
+    of length 2 and three time samples separated by 0.25. The raw integral
+    counts two time steps. Only the time axis needs a spacing factor to give
+    the physical space-time integral over [0, 2] x [0, 0.5].
+
+    >>> from PySPIDER.commons.library import ConstantTerm
+    >>> from PySPIDER.commons.process_library_terms import IntegrationDomain, Weight
+    >>> from PySPIDER.commons.quadrature_schemes import mapped_chebyshev_nodes
+    >>> x = mapped_chebyshev_nodes(5, 0.0, 2.0)
+    >>> ds = SRDataset(world_size=[5, 3], data_dict={'p': np.ones((5, 3))},
+    ...                observables=[], dxs=[1.0, 0.25], grids=[x, None],
+    ...                schemes_and_options={0: {'clenshaw-curtis': {'interval': (0, 2)}}})
+    >>> window = IntegrationDomain([0, 0], [4, 2])
+    >>> weight = Weight(m=[0, 0], q=[0, 0], k=[0, 0], dxs=[1.0, 0.25])
+    >>> raw = ds.eval_on_domain(ConstantTerm(), weight, window)
+    >>> print(f'{raw:.6f}, {raw * ds.dxs[1]:.6f}')
+    4.000000, 1.000000
+    """
+
     # field_dict: dict[tuple[Any], np.ndarray[float]] = None 
     # storage of computed coarse-grained quantities: (prim, dims, domains) -> array
     def make_domains(self, ndomains, domain_size, pad=0):

@@ -194,16 +194,14 @@ def _moment_matching(arr, opts, weight=None, axis=0, domain_local_weight=False):
         raise ValueError(
             "moment-matching requires 'nodes' and 'interval' in scheme options; "
             "for subdomain integration use truncated-cc-grid or truncated-cg-grid "
-            "(infers nodes from array length) or pass nodes sliced to the subdomain."
+            "with a parent num_nodes and reference subinterval, or pass the sliced nodes."
         )
     n = arr.shape[0]
     if nodes.shape[0] != n:
         raise ValueError(
             f"moment-matching: array length {n} along the active axis does not "
             f"match {nodes.shape[0]} supplied nodes. Pass nodes sliced to the "
-            f"integration subdomain, or use truncated-cc-grid / truncated-cg-grid / "
-            f"clenshaw-curtis / chebyshev-gauss (which infer the node set from the "
-            f"array length)."
+            f"integration subdomain and its interval."
         )
     a, b = _interval(opts)
     qw = _moment_weights(nodes, a, b, weight, axis, domain_local_weight,
@@ -298,7 +296,7 @@ def int_arr(arr, schemes_and_options=None, weight=None, *, domain_local_weight=F
     Parameters
     ----------
     arr : array_like
-        Sampled function values. Each axis must correspond to the nodes of
+        Real or complex sampled function values. Each axis must correspond to the nodes of
         its selected rule, in the same order. Selecting a rule does not
         resample the data. When passing ``weight=``, supply values that have
         not already been multiplied by that weight.
@@ -544,7 +542,9 @@ def int_arr(arr, schemes_and_options=None, weight=None, *, domain_local_weight=F
             )
         return _int_arr_legacy(arr, schemes_and_options)
 
-    arr = np.asarray(arr, dtype=float)
+    arr = np.asarray(arr)
+    if not np.iscomplexobj(arr):
+        arr = arr.astype(float, copy=False)
     if schemes_and_options is None:
         spec = {}
     elif not isinstance(schemes_and_options, dict):

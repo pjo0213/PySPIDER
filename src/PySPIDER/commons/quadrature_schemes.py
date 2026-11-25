@@ -269,10 +269,10 @@ def _mapped_lobatto_reference_degree(nodes: np.ndarray, a: float, b: float) -> O
 
 def _mapped_gauss_reference_degree(nodes: np.ndarray, a: float, b: float) -> Optional[int]:
     """
-    Return N when nodes are a full Chebyshev-Lobatto grid affinely mapped onto [a, b].
+    Return the node count for a full Chebyshev-Gauss grid mapped onto [a, b].
 
     Accepts ascending or descending node orderings.
-    Returns None when the nodes do not match a full mapped Chebyshev-Lobatto grid.
+    Returns None when the nodes do not match a full mapped Chebyshev-Gauss grid.
     """
     nodes = np.asarray(nodes, dtype=float)
     if nodes.size < 1:
@@ -316,6 +316,9 @@ def clenshaw_curtis_weights(
     where s maps [a, b] onto [-1, 1]. ``w`` is 1 or one axis of a
     PySPIDER ``Weight``. Uses reference Clenshaw-Curtis weights times
     the affine Jacobian (b-a)/2. Weights are aligned with ascending nodes.
+    The returned weights omit ``weight.scale``. When combining axis weights
+    yourself, multiply the final sum by that scale once. ``int_arr`` does
+    this automatically.
 
     Parameters
     ----------
@@ -378,6 +381,9 @@ def chebyshev_gauss_weights(
     (first-kind / interior Chebyshev-Gauss grid). ``w`` is 1 or one axis of a
     PySPIDER ``Weight``. Uses reference DCT-III (Fejér-I) weights times the
     affine Jacobian (b-a)/2. Weights are aligned with ascending nodes.
+    The returned weights omit ``weight.scale``. When combining axis weights
+    yourself, multiply the final sum by that scale once. ``int_arr`` does
+    this automatically.
 
     Parameters
     ----------
@@ -498,6 +504,10 @@ def moment_matched_quad_weights(
     the weighted sum of the function samples by H to account for dx = H*ds.
     Transform a physical weight consistently:
     W(x) becomes W((a+b)/2 + H*s), whereas a domain-local weight is W(s).
+
+    The returned weights include the polynomial for the selected axis, but
+    omit ``weight.scale``. When combining axis weights yourself, multiply
+    the final sum by that scale once. ``int_arr`` does this automatically.
 
     Callers should select degree and check convergence for their data.
 
